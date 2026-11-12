@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { useUniCharge } from '../../context/UniChargeContext';
 import {
+  Menu,
+  X,
   Zap,
   MapPin,
   Clock,
@@ -21,9 +23,12 @@ import {
   Gauge,
   Thermometer,
   QrCode,
-  Sparkles,
+  LayoutDashboard,
+  Settings,
+  HelpCircle,
 } from 'lucide-react';
-import { StudentTab, LockerCompartment, PaymentMethod } from '../../types';
+import { StudentTab } from '../../types';
+import { SettingsModal, HelpModal } from '../common/HelpSettingsModals';
 
 export const StudentPortal: React.FC = () => {
   const {
@@ -46,7 +51,13 @@ export const StudentPortal: React.FC = () => {
     setReceiptModalData,
   } = useUniCharge();
 
-  // Notification state
+  // Collapsible Left Sidebar state (desktop open by default, toggleable via hamburger)
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
+
+  // Modals
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -90,337 +101,477 @@ export const StudentPortal: React.FC = () => {
     setIsBookingModalOpen(true);
   };
 
+  const navItems = [
+    {
+      id: 'dashboard',
+      label: 'Dashboard',
+      icon: LayoutDashboard,
+    },
+    {
+      id: 'stations',
+      label: 'Stations Map',
+      icon: MapPin,
+    },
+    {
+      id: 'sessions',
+      label: 'My Sessions',
+      icon: Clock,
+      badge: activeUserSessions.length > 0 ? activeUserSessions.length : undefined,
+    },
+    {
+      id: 'wallet',
+      label: 'Wallet & Coins',
+      icon: CreditCard,
+    },
+  ];
+
+  const handleSelectTab = (tabId: StudentTab) => {
+    setActiveStudentTab(tabId);
+    setIsMobileDrawerOpen(false);
+  };
+
   return (
-    <div className="min-h-screen bg-[#F9FAFB] text-slate-900 flex flex-col">
+    <div className="min-h-screen bg-[#F9FAFB] text-slate-900 flex flex-col antialiased">
       
-      {/* 1. CLEAN WHITE INSTITUTIONAL TOP HEADER */}
-      <header className="bg-white border-b border-[#E5E7EB] sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
+      {/* =========================================================================
+          1. CLEAN WHITE TOP HEADER BAR WITH HAMBURGER BUTTON
+      ========================================================================== */}
+      <header className="bg-white border-b border-[#E5E7EB] sticky top-0 z-30 h-16 flex items-center justify-between px-4 sm:px-6">
+        
+        {/* Left: 3-Horizontal-Line Hamburger Button + Logo + Role Badge */}
+        <div className="flex items-center gap-3 sm:gap-4">
           
-          {/* Brand Wordmark & Collegiate Tag */}
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-[#1B1448] text-[#FBB03B] flex items-center justify-center font-bold shadow-sm">
+          {/* Hamburger Menu Toggle Button */}
+          <button
+            onClick={() => {
+              // On desktop toggle sidebar collapse; on mobile toggle slide-over drawer
+              if (window.innerWidth < 1024) {
+                setIsMobileDrawerOpen(!isMobileDrawerOpen);
+              } else {
+                setIsSidebarOpen(!isSidebarOpen);
+              }
+            }}
+            className="p-2 rounded-xl text-slate-600 hover:text-[#1B1448] hover:bg-slate-100 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1B1448]/20"
+            title="Toggle Navigation Sidebar"
+            aria-label="Toggle navigation menu"
+          >
+            <Menu className="w-5 h-5 text-[#1B1448]" />
+          </button>
+
+          {/* UniCharge Brand Logo Lockup */}
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-[#1B1448] text-[#FBB03B] flex items-center justify-center font-bold shadow-xs">
               <Zap className="w-5 h-5 fill-current" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-extrabold text-base tracking-tight text-[#1B1448]">
+                <span className="font-extrabold text-base tracking-tight text-[#1B1448] whitespace-nowrap">
                   UniCharge <span className="text-[#FBB03B]">USTP</span>
                 </span>
-                <span className="hidden sm:inline-block px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-100 text-slate-700">
+                <span className="hidden sm:inline-block px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-[#1B1448]/10 text-[#1B1448]">
                   STUDENT PORTAL
                 </span>
               </div>
-              <span className="text-[11px] text-slate-500 font-medium hidden sm:block">
-                University of Science and Technology of Southern Philippines
+              <span className="text-[10px] text-slate-400 font-medium hidden md:block">
+                University of Science & Technology of Southern Philippines
               </span>
             </div>
           </div>
 
-          {/* Quick Header Actions */}
-          <div className="flex items-center gap-3">
-            
-            {/* E-Wallet Quick Pill */}
-            <div
-              onClick={() => setActiveStudentTab('wallet')}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-[#E5E7EB] bg-slate-50 hover:border-[#FBB03B] cursor-pointer transition-colors"
-              title="Click to view E-Wallet & Top Up"
-            >
-              <CreditCard className="w-4 h-4 text-[#FBB03B]" />
-              <div className="text-left text-xs font-mono">
-                <span className="text-[10px] text-slate-400 block leading-tight">E-WALLET</span>
-                <span className="font-bold text-[#1B1448] tabular-nums">
-                  ₱{currentUser.walletBalance.toFixed(2)}
-                </span>
-              </div>
-            </div>
-
-            {/* Notification Bell */}
-            <div className="relative">
-              <button
-                onClick={() => setShowNotifications(!showNotifications)}
-                className="p-2 rounded-xl text-slate-500 hover:text-[#1B1448] hover:bg-slate-100 transition-colors relative"
-                title="Notifications"
-              >
-                <Bell className="w-4 h-4" />
-                {activeUserSessions.length > 0 && (
-                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[#FBB03B]" />
-                )}
-              </button>
-
-              {showNotifications && (
-                <div className="absolute right-0 mt-2 w-72 rounded-2xl bg-white border border-[#E5E7EB] shadow-xl p-3 z-40 text-xs space-y-2 animate-in fade-in">
-                  <div className="font-bold text-slate-800 pb-2 border-b border-slate-100 flex justify-between">
-                    <span>Campus Locker Notifications</span>
-                    <span className="text-[10px] text-slate-400 font-mono">USTP IoT</span>
-                  </div>
-                  {activeUserSessions.length > 0 ? (
-                    activeUserSessions.map(({ compartment, session }) => (
-                      <div key={session.sessionId} className="p-2.5 rounded-lg bg-amber-50/60 border border-amber-200 text-amber-900 space-y-1">
-                        <span className="font-bold block">Charging Active: Locker #{compartment.compartmentNumber}</span>
-                        <p className="text-[11px] text-amber-700">Solenoid locked. USB-PD fast-charging active at {compartment.currentPowerDrawWatts}W.</p>
-                      </div>
-                    ))
-                  ) : (
-                    <p className="text-slate-500 text-center py-3 text-[11px]">No pending alerts. All campus lockers nominal.</p>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Student Profile Lockup */}
-            <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
-              <div className="w-8 h-8 rounded-full bg-[#1B1448] text-[#FBB03B] flex items-center justify-center font-bold text-xs font-mono">
-                {currentUser.name.charAt(0)}
-              </div>
-              <div className="hidden md:block text-left text-xs">
-                <span className="font-bold text-slate-800 block leading-tight">
-                  {currentUser.name}
-                </span>
-                <span className="text-[10px] text-slate-500 font-mono">
-                  {currentUser.studentId}
-                </span>
-              </div>
-            </div>
-
-            {/* Launch Kiosk Simulator Button */}
-            <button
-              onClick={() => setIsKioskModalOpen(true)}
-              className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-[#1B1448] bg-[#FBB03B] hover:bg-[#FBB03B]/90 rounded-xl transition-all shadow-xs"
-              title="Test physical locker kiosk screen"
-            >
-              <Zap className="w-3.5 h-3.5" />
-              <span>Kiosk Simulator</span>
-            </button>
-
-          </div>
         </div>
 
-        {/* 2. DEEP INDIGO-NAVY NAVIGATION BAR WITH GOLD ACCENTS */}
-        <div className="bg-[#1B1448] text-white">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between">
+        {/* Right: E-Wallet Pill + Notifications + Jastin Alberca Profile */}
+        <div className="flex items-center gap-3">
+          
+          {/* E-Wallet Quick Pill (₱150.00) */}
+          <button
+            onClick={() => handleSelectTab('wallet')}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-[#E5E7EB] bg-slate-50 hover:border-[#FBB03B] transition-colors"
+            title="View E-Wallet Balance & Recharge"
+          >
+            <CreditCard className="w-4 h-4 text-[#FBB03B]" />
+            <div className="text-left text-xs font-mono">
+              <span className="text-[9px] text-slate-400 block uppercase font-bold tracking-wider leading-tight">
+                E-Wallet
+              </span>
+              <span className="font-bold text-[#1B1448] tabular-nums">
+                ₱{currentUser.walletBalance.toFixed(2)}
+              </span>
+            </div>
+          </button>
+
+          {/* Notification Bell with Gold Dot */}
+          <div className="relative">
+            <button
+              onClick={() => setShowNotifications(!showNotifications)}
+              className="p-2 rounded-xl text-slate-500 hover:text-[#1B1448] hover:bg-slate-100 transition-colors relative"
+              title="Notifications"
+            >
+              <Bell className="w-4 h-4" />
+              {activeUserSessions.length > 0 && (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[#FBB03B] ring-2 ring-white" />
+              )}
+            </button>
+
+            {showNotifications && (
+              <div className="absolute right-0 mt-2 w-72 rounded-2xl bg-white border border-[#E5E7EB] shadow-xl p-3 z-40 text-xs space-y-2 animate-in fade-in">
+                <div className="font-bold text-slate-800 pb-2 border-b border-slate-100 flex justify-between items-center">
+                  <span>Locker Notifications</span>
+                  <span className="text-[10px] text-slate-400 font-mono">IoT Live</span>
+                </div>
+                {activeUserSessions.length > 0 ? (
+                  activeUserSessions.map(({ compartment, session }) => (
+                    <div key={session.sessionId} className="p-2.5 rounded-xl bg-amber-50/80 border border-amber-200 text-amber-900 space-y-1">
+                      <span className="font-bold block">Charging Active: Locker #{compartment.compartmentNumber}</span>
+                      <p className="text-[11px] text-amber-800">
+                        Solenoid locked. Fast-charging active at {compartment.currentPowerDrawWatts}W.
+                      </p>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-slate-500 text-center py-3 text-[11px]">No pending alerts. All campus lockers nominal.</p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Student Profile Lockup: Jastin Alberca (2023-30192) */}
+          <div className="flex items-center gap-2.5 pl-2 border-l border-slate-200">
+            <div className="w-8 h-8 rounded-full bg-[#1B1448] text-[#FBB03B] flex items-center justify-center font-bold text-xs font-mono shadow-xs">
+              {currentUser.name.charAt(0)}
+            </div>
+            <div className="hidden sm:block text-left text-xs">
+              <span className="font-bold text-slate-800 block leading-tight">
+                {currentUser.name}
+              </span>
+              <span className="text-[10px] text-slate-500 font-mono block">
+                {currentUser.studentId}
+              </span>
+            </div>
+          </div>
+
+          {/* Launch Kiosk Simulator Button */}
+          <button
+            onClick={() => setIsKioskModalOpen(true)}
+            className="hidden xl:flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-[#1B1448] bg-[#FBB03B] hover:bg-[#FBB03B]/90 rounded-xl transition-all shadow-xs"
+            title="Test physical locker kiosk screen"
+          >
+            <Zap className="w-3.5 h-3.5" />
+            <span>Kiosk Terminal</span>
+          </button>
+
+        </div>
+      </header>
+
+      {/* =========================================================================
+          2. WORKSPACE CONTAINER (COLLAPSIBLE SIDEBAR + MAIN CONTENT VIEWPORT)
+      ========================================================================== */}
+      <div className="flex-1 flex overflow-hidden relative">
+        
+        {/* Mobile Slide-Over Backdrop */}
+        {isMobileDrawerOpen && (
+          <div
+            onClick={() => setIsMobileDrawerOpen(false)}
+            className="fixed inset-0 z-40 bg-black/40 backdrop-blur-xs lg:hidden animate-in fade-in"
+          />
+        )}
+
+        {/* CLEAN WHITE COLLAPSIBLE LEFT SIDEBAR */}
+        <aside
+          className={`bg-white border-r border-[#E5E7EB] flex flex-col justify-between shrink-0 transition-all duration-300 ease-in-out z-40 ${
+            // Desktop behavior:
+            isSidebarOpen ? 'lg:w-64' : 'lg:w-0 lg:border-r-0 lg:overflow-hidden'
+          } ${
+            // Mobile drawer behavior:
+            isMobileDrawerOpen
+              ? 'fixed inset-y-0 left-0 w-72 shadow-2xl z-50'
+              : 'max-lg:hidden'
+          }`}
+        >
+          {/* Top Section inside Sidebar: Brand & Role */}
+          <div className="p-4 border-b border-[#E5E7EB] flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-[#1B1448] text-[#FBB03B] flex items-center justify-center font-bold">
+                <Zap className="w-4 h-4 fill-current" />
+              </div>
+              <div>
+                <span className="font-extrabold text-sm text-[#1B1448] block leading-tight">
+                  UniCharge USTP
+                </span>
+                <span className="text-[10px] text-slate-400 font-mono uppercase font-semibold">
+                  Student Portal
+                </span>
+              </div>
+            </div>
+
+            {/* Mobile close button inside drawer */}
+            <button
+              onClick={() => setIsMobileDrawerOpen(false)}
+              className="p-1 rounded-lg text-slate-400 hover:text-slate-700 lg:hidden"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Navigation Links Area */}
+          <div className="p-3 flex-1 space-y-6 overflow-y-auto">
             
-            {/* Tabs */}
-            <nav className="flex space-x-1 sm:space-x-4">
-              {[
-                { id: 'dashboard', label: 'Dashboard' },
-                { id: 'stations', label: 'Stations Map' },
-                { id: 'sessions', label: 'My Sessions' },
-                { id: 'wallet', label: 'Wallet & Coins' },
-              ].map(tab => {
-                const isActive = activeStudentTab === tab.id;
+            {/* Main Navigation Group */}
+            <div className="space-y-1">
+              {navItems.map(item => {
+                const Icon = item.icon;
+                const isActive = activeStudentTab === item.id;
                 return (
                   <button
-                    key={tab.id}
-                    onClick={() => setActiveStudentTab(tab.id as StudentTab)}
-                    className={`py-3.5 px-3 text-xs font-bold transition-all relative whitespace-nowrap flex items-center gap-1.5 ${
+                    key={item.id}
+                    onClick={() => handleSelectTab(item.id as StudentTab)}
+                    className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-xs font-bold transition-all ${
                       isActive
-                        ? 'text-[#FBB03B]'
-                        : 'text-slate-300 hover:text-white'
+                        ? 'bg-[#1B1448]/10 text-[#1B1448] shadow-xs'
+                        : 'text-[#6B7280] hover:text-[#1B1448] hover:bg-gray-50'
                     }`}
                   >
-                    <span>{tab.label}</span>
-                    {tab.id === 'sessions' && activeUserSessions.length > 0 && (
-                      <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-[#FBB03B] text-[#1B1448] font-bold">
-                        {activeUserSessions.length}
+                    <div className="flex items-center gap-2.5">
+                      <Icon className={`w-4 h-4 ${isActive ? 'text-[#1B1448]' : 'text-[#6B7280]'}`} />
+                      <span>{item.label}</span>
+                    </div>
+
+                    {/* Gold Badge Counter (e.g. 1 Active Session) */}
+                    {item.badge !== undefined && (
+                      <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold bg-[#FBB03B] text-[#1B1448] shadow-2xs">
+                        {item.badge}
                       </span>
-                    )}
-                    {isActive && (
-                      <span className="absolute bottom-0 inset-x-2 h-0.5 bg-[#FBB03B] rounded-t-full shadow-xs" />
                     )}
                   </button>
                 );
               })}
-            </nav>
-
-            {/* Logout Action */}
-            <button
-              onClick={logout}
-              className="flex items-center gap-1.5 py-2 px-3 text-xs font-semibold text-slate-300 hover:text-white rounded-lg transition-colors"
-              title="Sign out of student account"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Logout</span>
-            </button>
-
-          </div>
-        </div>
-      </header>
-
-      {/* Main Content Viewport */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-        
-        {/* Toast Feedback */}
-        {toastMessage && (
-          <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-medium flex items-center justify-between animate-in fade-in shadow-xs">
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-              <span>{toastMessage}</span>
-            </div>
-            <button onClick={() => setToastMessage(null)} className="text-slate-400 hover:text-slate-700">✕</button>
-          </div>
-        )}
-
-        {/* =========================================================================
-            TAB 1: DASHBOARD
-        ========================================================================== */}
-        {activeStudentTab === 'dashboard' && (
-          <div className="space-y-6">
-            
-            {/* Welcome Greeting Banner */}
-            <div className="bg-white rounded-2xl border border-[#E5E7EB] p-6 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div>
-                <span className="text-xs font-bold uppercase tracking-wider text-[#FBB03B] block">
-                  USTP Student Portal
-                </span>
-                <h2 className="text-2xl font-extrabold text-[#1B1448] tracking-tight mt-0.5">
-                  Hi, {currentUser.name}!
-                </h2>
-                <p className="text-xs text-slate-600 mt-1 max-w-xl">
-                  Your smart locker command center. Reserve campus charging compartments, view live power telemetry, and top up your university e-wallet.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => setActiveStudentTab('stations')}
-                  className="px-4 py-2.5 text-xs font-bold text-white bg-[#1B1448] hover:bg-[#1B1448]/90 rounded-xl transition-all shadow-sm flex items-center gap-1.5"
-                >
-                  <MapPin className="w-4 h-4 text-[#FBB03B]" />
-                  <span>Reserve a Locker</span>
-                </button>
-                <button
-                  onClick={() => setIsTopUpOpen(true)}
-                  className="px-4 py-2.5 text-xs font-bold text-[#1B1448] bg-[#FBB03B] hover:bg-[#FBB03B]/90 rounded-xl transition-all shadow-sm flex items-center gap-1.5"
-                >
-                  <PlusCircle className="w-4 h-4" />
-                  <span>Reload ₱</span>
-                </button>
-              </div>
             </div>
 
-            {/* Active Locker Countdown Card (Prominent Hero Feature) */}
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-extrabold text-[#1B1448] uppercase tracking-wider flex items-center gap-2">
-                  <Clock className="w-4 h-4 text-[#FBB03B]" />
-                  <span>Current Active Locker Session</span>
-                </h3>
-                <span className="text-xs font-mono text-emerald-600 font-semibold">
-                  Solenoid Lock: Monitored
+            {/* Bottom Account Section (Separated by subtle uppercase label) */}
+            <div className="pt-4 border-t border-slate-100 space-y-1">
+              <span className="px-3 text-[10px] uppercase font-bold tracking-wider text-slate-400 block mb-2">
+                ACCOUNT
+              </span>
+
+              <button
+                onClick={() => setIsSettingsOpen(true)}
+                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 rounded-lg text-xs font-semibold text-[#6B7280] hover:text-[#1B1448] hover:bg-gray-50 transition-colors"
+              >
+                <Settings className="w-4 h-4 text-[#6B7280]" />
+                <span>Settings</span>
+              </button>
+
+              <button
+                onClick={() => setIsHelpOpen(true)}
+                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 rounded-lg text-xs font-semibold text-[#6B7280] hover:text-[#1B1448] hover:bg-gray-50 transition-colors"
+              >
+                <HelpCircle className="w-4 h-4 text-[#6B7280]" />
+                <span>Help & Support</span>
+              </button>
+
+              <button
+                onClick={logout}
+                className="w-full flex items-center gap-2.5 px-3.5 py-2.5 rounded-lg text-xs font-semibold text-rose-600 hover:bg-rose-50 transition-colors mt-1"
+              >
+                <LogOut className="w-4 h-4 text-rose-600" />
+                <span>Logout</span>
+              </button>
+            </div>
+
+          </div>
+
+          {/* Sidebar Footer User Card */}
+          <div className="p-3 border-t border-[#E5E7EB] bg-slate-50/50">
+            <div className="flex items-center gap-2.5 p-2 rounded-xl bg-white border border-[#E5E7EB]">
+              <div className="w-8 h-8 rounded-full bg-[#1B1448] text-[#FBB03B] flex items-center justify-center font-bold text-xs font-mono shrink-0">
+                {currentUser.name.charAt(0)}
+              </div>
+              <div className="min-w-0 flex-1">
+                <span className="font-bold text-xs text-slate-900 block truncate leading-tight">
+                  {currentUser.name}
+                </span>
+                <span className="text-[10px] text-slate-500 font-mono block truncate">
+                  CITC · {currentUser.studentId}
                 </span>
               </div>
+            </div>
+          </div>
+        </aside>
 
-              {activeUserSessions.length === 0 ? (
-                <div className="bg-white rounded-2xl border border-dashed border-[#E5E7EB] p-10 text-center space-y-3">
-                  <div className="w-12 h-12 rounded-full bg-slate-100 text-slate-400 mx-auto flex items-center justify-center">
-                    <Lock className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-bold text-slate-800">
-                      No Active Locker Reserved
-                    </h4>
-                    <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
-                      Need fast device charging or secure backpack storage between classes? Pick any free compartment from the campus grid.
-                    </p>
-                  </div>
+        {/* MAIN CONTENT AREA */}
+        <div className="flex-1 overflow-y-auto max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+          
+          {/* Toast Feedback */}
+          {toastMessage && (
+            <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-medium flex items-center justify-between animate-in fade-in shadow-xs">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{toastMessage}</span>
+              </div>
+              <button onClick={() => setToastMessage(null)} className="text-slate-400 hover:text-slate-700">✕</button>
+            </div>
+          )}
+
+          {/* =========================================================================
+              TAB 1: DASHBOARD
+          ========================================================================== */}
+          {activeStudentTab === 'dashboard' && (
+            <div className="space-y-6">
+              
+              {/* Welcome Greeting Banner */}
+              <div className="bg-white rounded-2xl border border-[#E5E7EB] p-6 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                  <span className="text-xs font-bold uppercase tracking-wider text-[#FBB03B] block">
+                    USTP Student Portal
+                  </span>
+                  <h2 className="text-2xl font-extrabold text-[#1B1448] tracking-tight mt-0.5">
+                    Hi, {currentUser.name}!
+                  </h2>
+                  <p className="text-xs text-slate-600 mt-1 max-w-xl">
+                    Your smart locker command center. Reserve campus charging compartments, view live power telemetry, and top up your university e-wallet.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-3">
                   <button
                     onClick={() => setActiveStudentTab('stations')}
-                    className="mt-2 px-4 py-2 text-xs font-bold text-white bg-[#1B1448] hover:bg-[#1B1448]/90 rounded-xl"
+                    className="px-4 py-2.5 text-xs font-bold text-white bg-[#1B1448] hover:bg-[#1B1448]/90 rounded-xl transition-all shadow-sm flex items-center gap-1.5"
                   >
-                    View Campus Kiosks
+                    <MapPin className="w-4 h-4 text-[#FBB03B]" />
+                    <span>Reserve a Locker</span>
+                  </button>
+                  <button
+                    onClick={() => setIsTopUpOpen(true)}
+                    className="px-4 py-2.5 text-xs font-bold text-[#1B1448] bg-[#FBB03B] hover:bg-[#FBB03B]/90 rounded-xl transition-all shadow-sm flex items-center gap-1.5"
+                  >
+                    <PlusCircle className="w-4 h-4" />
+                    <span>Reload ₱</span>
                   </button>
                 </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-4">
-                  {activeUserSessions.map(({ compartment, session, station }) => {
-                    const endTimestamp = new Date(session.endTime).getTime();
-                    const remainingMs = Math.max(0, endTimestamp - Date.now());
-                    const remainingMinutes = Math.floor(remainingMs / (60 * 1000));
-                    const isExpiringSoon = remainingMinutes < 15;
+              </div>
 
-                    return (
-                      <div
-                        key={session.sessionId}
-                        className="bg-white rounded-2xl border border-[#E5E7EB] p-6 shadow-sm overflow-hidden relative"
-                      >
-                        <div className="absolute top-0 left-0 right-0 h-1 bg-[#FBB03B]" />
+              {/* Active Locker Countdown Card (Prominent Hero Feature) */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-extrabold text-[#1B1448] uppercase tracking-wider flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-[#FBB03B]" />
+                    <span>Current Active Locker Session</span>
+                  </h3>
+                  <span className="text-xs font-mono text-emerald-600 font-semibold">
+                    Solenoid Lock: Monitored
+                  </span>
+                </div>
 
-                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
-                          
-                          {/* Left Column: Locker Identity & Hardware Live Stats */}
-                          <div className="lg:col-span-4 space-y-3">
-                            <div className="flex items-center gap-3">
-                              <div className="w-12 h-12 rounded-2xl bg-[#1B1448] text-[#FBB03B] font-mono font-black text-xl flex items-center justify-center shadow-sm">
-                                #{compartment.compartmentNumber}
+                {activeUserSessions.length === 0 ? (
+                  <div className="bg-white rounded-2xl border border-dashed border-[#E5E7EB] p-10 text-center space-y-3">
+                    <div className="w-12 h-12 rounded-full bg-slate-100 text-slate-400 mx-auto flex items-center justify-center">
+                      <Lock className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-slate-800">
+                        No Active Locker Reserved
+                      </h4>
+                      <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
+                        Need fast device charging or secure backpack storage between classes? Pick any free compartment from the campus grid.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setActiveStudentTab('stations')}
+                      className="mt-2 px-4 py-2 text-xs font-bold text-white bg-[#1B1448] hover:bg-[#1B1448]/90 rounded-xl"
+                    >
+                      View Campus Kiosks
+                    </button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 gap-4">
+                    {activeUserSessions.map(({ compartment, session, station }) => {
+                      const endTimestamp = new Date(session.endTime).getTime();
+                      const remainingMs = Math.max(0, endTimestamp - Date.now());
+                      const remainingMinutes = Math.floor(remainingMs / (60 * 1000));
+                      const isExpiringSoon = remainingMinutes < 15;
+
+                      return (
+                        <div
+                          key={session.sessionId}
+                          className="bg-white rounded-2xl border border-[#E5E7EB] p-6 shadow-sm overflow-hidden relative"
+                        >
+                          <div className="absolute top-0 left-0 right-0 h-1 bg-[#FBB03B]" />
+
+                          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
+                            
+                            {/* Left Column: Locker Identity & Hardware Live Stats */}
+                            <div className="lg:col-span-4 space-y-3">
+                              <div className="flex items-center gap-3">
+                                <div className="w-12 h-12 rounded-2xl bg-[#1B1448] text-[#FBB03B] font-mono font-black text-xl flex items-center justify-center shadow-sm">
+                                  #{compartment.compartmentNumber}
+                                </div>
+                                <div>
+                                  <span className="text-base font-extrabold text-[#1B1448] block leading-tight">
+                                    {station.name}
+                                  </span>
+                                  <span className="text-xs text-slate-500 font-mono">
+                                    Locker ID: {compartment.id} · {compartment.size === 'large' ? 'Large Compartment' : 'Standard'}
+                                  </span>
+                                </div>
                               </div>
-                              <div>
-                                <span className="text-base font-extrabold text-[#1B1448] block leading-tight">
-                                  {station.name}
-                                </span>
-                                <span className="text-xs text-slate-500 font-mono">
-                                  Locker ID: {compartment.id} · {compartment.size === 'large' ? 'Large Compartment' : 'Standard'}
-                                </span>
+
+                              <p className="text-xs text-slate-600">
+                                Stored: <strong className="text-slate-800">{session.deviceType || 'Laptop & Smart Device'}</strong>
+                              </p>
+
+                              {/* Live Telemetry Mini-Badges */}
+                              <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                                <div className="p-2 rounded-lg bg-slate-50 border border-slate-100">
+                                  <span className="text-[10px] text-slate-400 block">Fast-Charge Draw</span>
+                                  <span className="text-[#1B1448] font-bold flex items-center gap-1">
+                                    <Zap className="w-3.5 h-3.5 text-[#FBB03B] fill-current" />
+                                    {compartment.currentPowerDrawWatts.toFixed(1)} W
+                                  </span>
+                                </div>
+                                <div className="p-2 rounded-lg bg-slate-50 border border-slate-100">
+                                  <span className="text-[10px] text-slate-400 block">AC Safety Line</span>
+                                  <span className="text-slate-700 font-bold">
+                                    {station.voltage.toFixed(1)} V
+                                  </span>
+                                </div>
                               </div>
                             </div>
 
-                            <p className="text-xs text-slate-600">
-                              Stored: <strong className="text-slate-800">{session.deviceType || 'Laptop & Smart Device'}</strong>
-                            </p>
-
-                            {/* Live Telemetry Mini-Badges */}
-                            <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-                              <div className="p-2 rounded-lg bg-slate-50 border border-slate-100">
-                                <span className="text-[10px] text-slate-400 block">Fast-Charge Draw</span>
-                                <span className="text-[#1B1448] font-bold flex items-center gap-1">
-                                  <Zap className="w-3.5 h-3.5 text-[#FBB03B] fill-current" />
-                                  {compartment.currentPowerDrawWatts.toFixed(1)} W
-                                </span>
+                            {/* Center Column: Prominent Circular Countdown */}
+                            <div className="lg:col-span-4 text-center py-2 px-4 border-y lg:border-y-0 lg:border-x border-[#E5E7EB]">
+                              <span className="text-xs uppercase font-bold text-slate-400 tracking-wider block mb-1">
+                                Time Remaining
+                              </span>
+                              <div
+                                className={`font-mono text-4xl sm:text-5xl font-black tabular-nums tracking-tight ${
+                                  isExpiringSoon ? 'text-red-600 animate-pulse' : 'text-[#1B1448]'
+                                }`}
+                              >
+                                {Math.floor(remainingMinutes / 60)}h {remainingMinutes % 60}m
                               </div>
-                              <div className="p-2 rounded-lg bg-slate-50 border border-slate-100">
-                                <span className="text-[10px] text-slate-400 block">AC Safety Line</span>
-                                <span className="text-slate-700 font-bold">
-                                  {station.voltage.toFixed(1)} V
-                                </span>
+                              <span className="text-[11px] text-slate-500 block mt-1">
+                                Auto-deducted from E-Wallet · 15m grace window
+                              </span>
+
+                              {/* Emergency PIN display */}
+                              <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-100 font-mono text-xs text-slate-800">
+                                <QrCode className="w-3.5 h-3.5 text-slate-600" />
+                                <span>Kiosk PIN: <strong className="text-[#1B1448] tracking-widest">{session.pinCode}</strong></span>
                               </div>
                             </div>
-                          </div>
 
-                          {/* Center Column: Prominent Circular Countdown */}
-                          <div className="lg:col-span-4 text-center py-2 px-4 border-y lg:border-y-0 lg:border-x border-[#E5E7EB]">
-                            <span className="text-xs uppercase font-bold text-slate-400 tracking-wider block mb-1">
-                              Time Remaining
-                            </span>
-                            <div
-                              className={`font-mono text-4xl sm:text-5xl font-black tabular-nums tracking-tight ${
-                                isExpiringSoon ? 'text-red-600 animate-pulse' : 'text-[#1B1448]'
-                              }`}
-                            >
-                              {Math.floor(remainingMinutes / 60)}h {remainingMinutes % 60}m
-                            </div>
-                            <span className="text-[11px] text-slate-500 block mt-1">
-                              Auto-deducted from E-Wallet · 15m grace window
-                            </span>
-
-                            {/* Emergency PIN display */}
-                            <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-100 font-mono text-xs text-slate-800">
-                              <QrCode className="w-3.5 h-3.5 text-slate-600" />
-                              <span>Kiosk PIN: <strong className="text-[#1B1448] tracking-widest">{session.pinCode}</strong></span>
-                            </div>
-                          </div>
-
-                          {/* Right Column: Actions */}
-                          <div className="lg:col-span-4 space-y-2.5">
-                            <button
-                              onClick={() => handleUnlockLocker(compartment.id)}
-                              className="w-full py-3 px-4 text-xs font-bold text-white bg-[#1B1448] hover:bg-red-600 rounded-xl transition-colors shadow-sm flex items-center justify-center gap-2"
-                            >
-                              <Unlock className="w-4 h-4" />
-                              <span>Open Locker / End Session</span>
-                            </button>
-
-                            <div className="grid grid-cols-2 gap-2">
+                            {/* Right Column: Actions */}
+                            <div className="lg:col-span-4 space-y-2.5">
                               <button
+                                onClick={() => handleUnlockLocker(compartment.id)}
+                                className="w-full py-3 px-4 text-xs font-bold text-white bg-[#1B1448] hover:bg-red-600 rounded-xl transition-colors shadow-sm flex items-center justify-center gap-2"
+                              >
+                                <Unlock className="w-4 h-4" />
+                                <span>Open Locker / End Session</span>
+                              </button>
+
+                              <div className="grid grid-cols-2 gap-2">
+                                <button
                                 onClick={() => setExtendCompId(compartment.id)}
                                 className="py-2.5 px-3 text-xs font-bold text-[#1B1448] bg-[#FBB03B] hover:bg-[#FBB03B]/90 rounded-xl transition-colors text-center"
                               >
@@ -907,7 +1058,8 @@ export const StudentPortal: React.FC = () => {
           </div>
         )}
 
-      </main>
+        </div>
+      </div>
 
       {/* Top-Up Modal */}
       {isTopUpOpen && (
@@ -1027,6 +1179,18 @@ export const StudentPortal: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Reusable Settings & Help Modals */}
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        userType="student"
+      />
+
+      <HelpModal
+        isOpen={isHelpOpen}
+        onClose={() => setIsHelpOpen(false)}
+      />
 
     </div>
   );

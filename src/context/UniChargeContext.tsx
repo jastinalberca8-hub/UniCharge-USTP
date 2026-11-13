@@ -1,653 +1,1042 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import confetti from 'canvas-confetti';
 import {
-  LockerStation,
-  LockerCompartment,
-  StudentUser,
-  AdminUser,
-  TransactionRecord,
-  TamperAlertEvent,
-  PaymentMethod,
+  KioskStation,
+  UserAccount,
+  SessionHistoryItem,
   ActiveSession,
-  AuthRole,
-  StudentTab,
-  AdminTab,
+  ServiceType,
+  LockerSize,
+  LockerSlot,
+  SecurityAlert,
+  PendingUnlockToken,
 } from '../types';
 import {
+  SEEDED_USERS,
+  INITIAL_STUDENT,
   INITIAL_STATIONS,
-  INITIAL_STUDENTS,
-  INITIAL_ADMIN,
-  INITIAL_TRANSACTIONS,
-  INITIAL_ALERTS,
+  INITIAL_SAMPLE_SESSION,
+  INITIAL_HISTORY,
+  INITIAL_SECURITY_ALERTS,
+  PRICING_RATES,
 } from '../data/mockData';
+import { sound } from '../utils/audio';
 
-export type AppRoute = 'login' | 'signup' | 'forgot-password' | 'student-dashboard' | 'admin-dashboard';
+export type AppRoute =
+  | '/login'
+  | '/signup'
+  | '/student/dashboard'
+  | '/mobile-expo'
+  | '/admin/dashboard';
+
+interface AuthResult {
+  success: boolean;
+  error?: string;
+  user?: UserAccount;
+}
 
 interface UniChargeContextType {
-  // Routing & Authentication
+  isAuthenticated: boolean;
+  currentUser: UserAccount | null;
+  student: UserAccount;
+  users: UserAccount[];
   currentRoute: AppRoute;
-  setCurrentRoute: (route: AppRoute) => void;
-  authRole: AuthRole;
-  setAuthRole: (role: AuthRole) => void;
-  activeStudentTab: StudentTab;
-  setActiveStudentTab: (tab: StudentTab) => void;
-  activeAdminTab: AdminTab;
-  setActiveAdminTab: (tab: AdminTab) => void;
-  
-  // Users
-  currentUser: StudentUser;
-  setCurrentUser: (u: StudentUser) => void;
-  currentAdmin: AdminUser;
-  studentsList: StudentUser[];
-  
-  // Auth Handlers
-  loginAsStudent: (emailOrId: string) => boolean;
-  loginAsAdmin: (emailOrId: string) => boolean;
-  signUpStudent: (data: { name: string; studentId: string; college: string; email: string }) => void;
+  accessDeniedMessage: string | null;
+  clearAccessDenied: () => void;
+  navigate: (route: AppRoute) => void;
+  stations: KioskStation[];
+  selectedStation: KioskStation;
+  selectedSlot: LockerSlot | null;
+  selectedService: ServiceType;
+  selectedSize: LockerSize;
+  selectedDuration: number;
+  activeSession: ActiveSession | null;
+  pendingUnlockToken: PendingUnlockToken | null;
+  pendingSecondsLeft: number;
+  sessionHistory: SessionHistoryItem[];
+  securityAlerts: SecurityAlert[];
+  hardwareKioskStationId: string;
+  isKioskDoorOpen: boolean;
+  activeKioskSlotReleased: number | null;
+  // Auth Methods
+  loginWithAccount: (identifier: string, password: string) => AuthResult;
+  loginDemoByEmail: (email: string) => AuthResult;
+  registerStudentAccount: (params: {
+    name: string;
+    studentIdNumber: string;
+    email: string;
+    password: string;
+    college?: string;
+  }) => AuthResult;
+  loginDemo: () => void;
+  loginWithCredentials: (studentId: string, email: string) => boolean;
   logout: () => void;
-  
-  // Data State
-  stations: LockerStation[];
-  activeStationId: string;
-  setActiveStationId: (id: string) => void;
-  selectedStation: LockerStation;
-  selectedCompartment: LockerCompartment | null;
-  setSelectedCompartment: (c: LockerCompartment | null) => void;
-  transactions: TransactionRecord[];
-  alerts: TamperAlertEvent[];
-
-  // Compatibility
-  currentView: string;
-  setCurrentView: (v: any) => void;
-  theme: string;
-  toggleTheme: () => void;
-  
-  // Modals
-  isKioskModalOpen: boolean;
-  setIsKioskModalOpen: (open: boolean) => void;
-  kioskInitialStationId: string;
-  setKioskInitialStationId: (id: string) => void;
-  isBookingModalOpen: boolean;
-  setIsBookingModalOpen: (open: boolean) => void;
-  bookingTarget: { stationId: string; compartmentNumber: number } | null;
-  setBookingTarget: (target: { stationId: string; compartmentNumber: number } | null) => void;
-  receiptModalData: TransactionRecord | null;
-  setReceiptModalData: (txn: TransactionRecord | null) => void;
-  
-  // Actions
-  bookLocker: (
-    stationId: string,
-    compartmentNumber: number,
-    durationHours: number,
-    paymentMethod: PaymentMethod,
-    deviceType?: string
-  ) => { success: boolean; qrToken: string; pinCode: string; message: string };
-  extendSession: (compartmentId: string, additionalMinutes: number) => { success: boolean; message: string };
-  unlockAndEndSession: (compartmentId: string) => { success: boolean; message: string };
-  topUpWallet: (amount: number, method: string) => void;
-  remoteForceUnlock: (compartmentId: string, adminKey: string) => { success: boolean; message: string };
-  resolveAlert: (alertId: string, resolvedBy: string) => void;
-  toggleStationMaintenance: (stationId: string) => void;
-  toggleCompartmentMaintenance: (stationId: string, compartmentNumber: number) => void;
-  insertCoinAtKiosk: (stationId: string, coinValue: number) => void;
-  emptyCoinHopper: (stationId: string) => void;
-  rebootStationGateway: (stationId: string) => void;
-  emergencyFanOverride: (stationId: string) => void;
-  
-  // Computed
-  activeUserSessions: { compartment: LockerCompartment; session: ActiveSession; station: LockerStation }[];
+  // Student / Hardware Methods
+  setSelectedStation: (station: KioskStation) => void;
+  setSelectedSlot: (slot: LockerSlot | null) => void;
+  setSelectedService: (service: ServiceType) => void;
+  setSelectedSize: (size: LockerSize) => void;
+  setSelectedDuration: (duration: number) => void;
+  calculateFee: (size: LockerSize, durationMinutes: number, service: ServiceType) => number;
+  generateUnlockToken: (
+    paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash'
+  ) => { success: boolean; message: string; token?: PendingUnlockToken };
+  regenerateUnlockToken: () => void;
+  cancelPendingUnlock: () => void;
+  verifyKioskUnlock: (
+    pinOrQrPayload: string,
+    kioskStationId?: string
+  ) => { success: boolean; message: string };
+  unlockStationViaQr: (
+    qrCode: string,
+    paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash'
+  ) => { success: boolean; message: string };
+  endActiveSession: () => { success: boolean; message: string };
+  topUpWallet: (amount: number) => void;
+  toggleBiometrics: () => void;
+  togglePushNotifications: () => void;
+  toggleOverchargeProtection: () => void;
+  updateUserProfile: (updates: {
+    name?: string;
+    college?: string;
+    degree?: string;
+    avatar?: string;
+  }) => void;
+  closeKioskDoor: (slotNumber: number) => void;
+  triggerSimulatedTamper: () => void;
+  setHardwareKioskStationId: (stationId: string) => void;
+  // Admin Methods
+  adminRemoteUnlockSlot: (stationId: string, slotNumber: number) => void;
+  adminToggleSlotMaintenance: (stationId: string, slotNumber: number) => void;
+  adminProvisionStaff: (params: {
+    name: string;
+    email: string;
+    staffId: string;
+    password: string;
+  }) => AuthResult;
+  resolveSecurityAlert: (alertId: string) => void;
 }
 
 const UniChargeContext = createContext<UniChargeContextType | undefined>(undefined);
 
+function normalizePath(pathname: string): AppRoute {
+  if (pathname === '/signup') return '/signup';
+  if (pathname === '/student/dashboard') return '/student/dashboard';
+  if (pathname === '/mobile-expo') return '/mobile-expo';
+  if (pathname === '/admin/dashboard') return '/admin/dashboard';
+  return '/login';
+}
+
 export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Navigation & Auth
-  const [currentRoute, setCurrentRoute] = useState<AppRoute>('student-dashboard'); // default to student dashboard for immediate preview, user can logout to /login anytime
-  const [authRole, setAuthRole] = useState<AuthRole>('student');
-  const [activeStudentTab, setActiveStudentTab] = useState<StudentTab>('dashboard');
-  const [activeAdminTab, setActiveAdminTab] = useState<AdminTab>('overview');
+  const [users, setUsers] = useState<UserAccount[]>(SEEDED_USERS);
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
+  const [currentRoute, setCurrentRoute] = useState<AppRoute>(() =>
+    typeof window !== 'undefined' ? normalizePath(window.location.pathname) : '/login'
+  );
+  const [accessDeniedMessage, setAccessDeniedMessage] = useState<string | null>(null);
 
-  // Users
-  const [studentsList, setStudentsList] = useState<StudentUser[]>(INITIAL_STUDENTS);
-  const [currentUser, setCurrentUser] = useState<StudentUser>(INITIAL_STUDENTS[0]); // Jastin Alberca
-  const [currentAdmin] = useState<AdminUser>(INITIAL_ADMIN);
+  const [stations, setStations] = useState<KioskStation[]>(INITIAL_STATIONS);
+  const [selectedStation, setSelectedStation] = useState<KioskStation>(INITIAL_STATIONS[0]);
+  const [selectedSlot, setSelectedSlot] = useState<LockerSlot | null>(INITIAL_STATIONS[0].slots[0]);
+  const [selectedService, setSelectedService] = useState<ServiceType>('both');
+  const [selectedSize, setSelectedSize] = useState<LockerSize>('S');
+  const [selectedDuration, setSelectedDuration] = useState<number>(60);
+  const [sessionsByUserId, setSessionsByUserId] = useState<
+    Record<string, ActiveSession | null>
+  >({
+    usr_ustp_202330192: INITIAL_SAMPLE_SESSION,
+  });
+  const [historyByUserId, setHistoryByUserId] = useState<
+    Record<string, SessionHistoryItem[]>
+  >({
+    usr_ustp_202330192: INITIAL_HISTORY,
+  });
+  const [pendingUnlockToken, setPendingUnlockToken] = useState<PendingUnlockToken | null>(null);
+  const [pendingSecondsLeft, setPendingSecondsLeft] = useState<number>(0);
+  const [securityAlerts, setSecurityAlerts] = useState<SecurityAlert[]>(INITIAL_SECURITY_ALERTS);
 
-  // System Data
-  const [stations, setStations] = useState<LockerStation[]>(INITIAL_STATIONS);
-  const [activeStationId, setActiveStationId] = useState<string>('station-lib');
-  const [selectedCompartment, setSelectedCompartment] = useState<LockerCompartment | null>(null);
-  const [transactions, setTransactions] = useState<TransactionRecord[]>(INITIAL_TRANSACTIONS);
-  const [alerts, setAlerts] = useState<TamperAlertEvent[]>(INITIAL_ALERTS);
+  // Physical Kiosk Hardware Simulation state
+  const [hardwareKioskStationId, setHardwareKioskStationId] = useState<string>('station-citc-01');
+  const [isKioskDoorOpen, setIsKioskDoorOpen] = useState<boolean>(false);
+  const [activeKioskSlotReleased, setActiveKioskSlotReleased] = useState<number | null>(null);
 
-  // Modals
-  const [isKioskModalOpen, setIsKioskModalOpen] = useState(false);
-  const [kioskInitialStationId, setKioskInitialStationId] = useState('station-lib');
-  const [isBookingModalOpen, setIsBookingModalOpen] = useState(false);
-  const [bookingTarget, setBookingTarget] = useState<{ stationId: string; compartmentNumber: number } | null>(null);
-  const [receiptModalData, setReceiptModalData] = useState<TransactionRecord | null>(null);
+  const isAuthenticated = Boolean(currentUser);
+  const student = currentUser ?? INITIAL_STUDENT;
+  const activeSession = currentUser ? (sessionsByUserId[currentUser.id] ?? null) : null;
+  const sessionHistory = currentUser ? (historyByUserId[currentUser.id] ?? []) : [];
 
-  // Authentication logic
-  const loginAsStudent = (emailOrId: string) => {
-    const matched = studentsList.find(
-      s => s.email.toLowerCase() === emailOrId.toLowerCase() || s.studentId === emailOrId
-    );
-    if (matched) {
-      setCurrentUser(matched);
-    } else {
-      // Allow demo login
-      setCurrentUser(INITIAL_STUDENTS[0]);
-    }
-    setAuthRole('student');
-    setCurrentRoute('student-dashboard');
-    setActiveStudentTab('dashboard');
-    return true;
+  const setActiveSessionForCurrentUser = (
+    updater: ActiveSession | null | ((prev: ActiveSession | null) => ActiveSession | null)
+  ) => {
+    if (!currentUser) return;
+    const uid = currentUser.id;
+    setSessionsByUserId((prevMap) => {
+      const current = prevMap[uid] ?? null;
+      const next = typeof updater === 'function' ? updater(current) : updater;
+      return { ...prevMap, [uid]: next };
+    });
   };
 
-  const loginAsAdmin = (_emailOrId: string) => {
-    setAuthRole('admin');
-    setCurrentRoute('admin-dashboard');
-    setActiveAdminTab('overview');
-    return true;
-  };
+  const clearAccessDenied = useCallback(() => setAccessDeniedMessage(null), []);
 
-  const signUpStudent = (data: { name: string; studentId: string; college: string; email: string }) => {
-    const newStudent: StudentUser = {
-      id: `user-${Date.now()}`,
-      name: data.name,
-      studentId: data.studentId,
-      email: data.email,
-      college: data.college,
-      program: `${data.college} Student`,
-      walletBalance: 150.0,
-      campusCardRfid: `USTP-RFID-${Math.floor(1000 + Math.random() * 9000)}`,
-    };
-    setStudentsList(prev => [newStudent, ...prev]);
-    setCurrentUser(newStudent);
-  };
+  // Strict RBAC Route Enforcement Helper
+  const enforceRouteGuard = useCallback(
+    (targetRoute: AppRoute, user: UserAccount | null): AppRoute => {
+      if (!user) {
+        if (targetRoute === '/signup') return '/signup';
+        return '/login';
+      }
 
-  const logout = () => {
-    setCurrentRoute('login');
-  };
+      if (user.role === 'student') {
+        if (targetRoute === '/admin/dashboard') {
+          setAccessDeniedMessage('Access Denied: Admin privileges required');
+          return '/student/dashboard';
+        }
+        if (targetRoute === '/mobile-expo') return '/mobile-expo';
+        if (targetRoute === '/login' || targetRoute === '/signup') {
+          return '/student/dashboard';
+        }
+        return '/student/dashboard';
+      }
 
-  // Periodic Telemetry Simulation
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setStations(prevStations =>
-        prevStations.map(station => {
-          const vJitter = (Math.random() - 0.5) * 0.4;
-          const newVoltage = Math.round((station.voltage + vJitter) * 10) / 10;
-          
-          const updatedCompartments = station.compartments.map(comp => {
-            if (comp.status === 'in_use' && comp.currentSession) {
-              const pJitter = (Math.random() - 0.5) * 0.8;
-              const newWatts = Math.max(5, Math.min(65, Math.round((comp.currentPowerDrawWatts + pJitter) * 10) / 10));
-              const newTemp = Math.min(42, Math.round((comp.temperature + (Math.random() - 0.48) * 0.15) * 10) / 10);
-              return {
-                ...comp,
-                currentPowerDrawWatts: newWatts,
-                temperature: newTemp,
-                currentSession: {
-                  ...comp.currentSession,
-                  currentWatts: newWatts,
-                },
-              };
-            }
-            return comp;
-          });
+      if (user.role === 'admin') {
+        if (targetRoute !== '/admin/dashboard') {
+          return '/admin/dashboard';
+        }
+        return '/admin/dashboard';
+      }
 
-          const avgTemp = Math.round((updatedCompartments.reduce((acc, c) => acc + c.temperature, 0) / updatedCompartments.length) * 10) / 10;
-
-          return {
-            ...station,
-            voltage: newVoltage,
-            temperature: avgTemp,
-            compartments: updatedCompartments,
-          };
-        })
-      );
-    }, 4000);
-
-    return () => clearInterval(interval);
-  }, []);
-
-  const selectedStation = stations.find(s => s.id === activeStationId) || stations[0];
-
-  const activeUserSessions = stations.flatMap(station =>
-    station.compartments
-      .filter(comp => comp.currentSession && comp.currentSession.userId === currentUser.id)
-      .map(comp => ({
-        compartment: comp,
-        session: comp.currentSession!,
-        station,
-      }))
+      return '/login';
+    },
+    []
   );
 
-  const bookLocker = (
-    stationId: string,
-    compartmentNumber: number,
-    durationHours: number,
-    paymentMethod: PaymentMethod,
-    deviceType = 'Smart Device / Laptop'
-  ) => {
-    const station = stations.find(s => s.id === stationId);
-    if (!station) return { success: false, qrToken: '', pinCode: '', message: 'Station not found.' };
+  const navigate = useCallback(
+    (route: AppRoute) => {
+      const guarded = enforceRouteGuard(route, currentUser);
+      setCurrentRoute(guarded);
+      if (typeof window !== 'undefined' && window.location.pathname !== guarded) {
+        window.history.pushState({}, '', guarded);
+      }
+    },
+    [currentUser, enforceRouteGuard]
+  );
 
-    const comp = station.compartments.find(c => c.compartmentNumber === compartmentNumber);
-    if (!comp) return { success: false, qrToken: '', pinCode: '', message: 'Compartment not found.' };
+  useEffect(() => {
+    const guarded = enforceRouteGuard(currentRoute, currentUser);
+    if (guarded !== currentRoute) {
+      setCurrentRoute(guarded);
+    }
+    if (typeof window !== 'undefined' && window.location.pathname !== guarded) {
+      window.history.replaceState({}, '', guarded);
+    }
+  }, [currentRoute, currentUser, enforceRouteGuard]);
 
-    if (comp.status !== 'available') {
-      return { success: false, qrToken: '', pinCode: '', message: 'Locker is already in use or under maintenance.' };
+  useEffect(() => {
+    const handlePopState = () => {
+      const requested = normalizePath(window.location.pathname);
+      const guarded = enforceRouteGuard(requested, currentUser);
+      setCurrentRoute(guarded);
+      if (window.location.pathname !== guarded) {
+        window.history.replaceState({}, '', guarded);
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [currentUser, enforceRouteGuard]);
+
+  // 60-second Countdown Timer for Pending QR Unlock Token
+  useEffect(() => {
+    if (!pendingUnlockToken) {
+      setPendingSecondsLeft(0);
+      return;
     }
 
-    const ratePerHour = comp.size === 'large' ? 15 : 10;
-    const totalCost = ratePerHour * durationHours;
+    const updateLeft = () => {
+      const diff = Math.max(0, Math.ceil((pendingUnlockToken.expiresAt - Date.now()) / 1000));
+      setPendingSecondsLeft(diff);
+    };
 
-    if (paymentMethod === 'wallet' && currentUser.walletBalance < totalCost) {
+    updateLeft();
+    const timer = setInterval(updateLeft, 500);
+    return () => clearInterval(timer);
+  }, [pendingUnlockToken]);
+
+  // Active Session Timer & Dynamic Telemetry
+  useEffect(() => {
+    if (!activeSession || activeSession.status !== 'active' || !currentUser) return;
+    const uid = currentUser.id;
+
+    const interval = setInterval(() => {
+      setSessionsByUserId((prevMap) => {
+        const prev = prevMap[uid];
+        if (!prev || prev.status !== 'active') return prevMap;
+        const newRemaining = Math.max(0, prev.remainingSeconds - 1);
+        const elapsedSeconds = prev.durationMinutes * 60 - newRemaining;
+        const simulatedCurrentBattery = Math.min(
+          100,
+          Math.floor(prev.batteryInitial + elapsedSeconds / 30)
+        );
+        const tempVariance = Math.sin(Date.now() / 15000) * 1.2;
+        const currentTemp = +(29.5 + tempVariance).toFixed(1);
+        const wattage =
+          simulatedCurrentBattery > 85
+            ? 18.5
+            : 42.0 + Math.floor(Math.sin(Date.now() / 4000) * 4);
+
+        const nextSession: ActiveSession =
+          newRemaining === 0
+            ? {
+                ...prev,
+                remainingSeconds: 0,
+                batteryCurrent: 100,
+                status: 'completed',
+              }
+            : {
+                ...prev,
+                remainingSeconds: newRemaining,
+                batteryCurrent: simulatedCurrentBattery,
+                lockerTemperature: currentTemp,
+                chargingRateWatts: wattage,
+              };
+
+        return { ...prevMap, [uid]: nextSession };
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [activeSession?.status, currentUser?.id]);
+
+  const calculateFee = (
+    size: LockerSize,
+    durationMinutes: number,
+    service: ServiceType
+  ): number => {
+    const hourlyRate = PRICING_RATES[size]?.hourly || 15;
+    const hours = durationMinutes / 60;
+    const baseFee = hourlyRate * hours;
+    const addOn = service === 'both' ? 5 : 0;
+    return Math.round(baseFee + addOn);
+  };
+
+  // Account-level RBAC login resolution
+  const loginWithAccount = (identifier: string, password: string): AuthResult => {
+    sound.playTap();
+    const trimmed = identifier.trim().toLowerCase();
+    const matched = users.find(
+      (u) =>
+        (u.email.toLowerCase() === trimmed || u.studentIdNumber.toLowerCase() === trimmed) &&
+        u.password === password
+    );
+
+    if (!matched) {
+      return { success: false, error: 'Invalid email/ID or password' };
+    }
+
+    setAccessDeniedMessage(null);
+    setCurrentUser(matched);
+    const destination: AppRoute =
+      matched.role === 'admin' ? '/admin/dashboard' : '/student/dashboard';
+    setCurrentRoute(destination);
+    if (typeof window !== 'undefined') {
+      window.history.pushState({}, '', destination);
+    }
+    return { success: true, user: matched };
+  };
+
+  const loginDemoByEmail = (email: string): AuthResult => {
+    const matched = users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+    if (!matched) {
+      return { success: false, error: 'Invalid email/ID or password' };
+    }
+    return loginWithAccount(matched.email, matched.password);
+  };
+
+  const registerStudentAccount = ({
+    name,
+    studentIdNumber,
+    email,
+    password,
+    college,
+  }: {
+    name: string;
+    studentIdNumber: string;
+    email: string;
+    password: string;
+    college?: string;
+  }): AuthResult => {
+    sound.playTap();
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanId = studentIdNumber.trim();
+
+    if (!name.trim() || !cleanId || !cleanEmail || !password) {
+      return { success: false, error: 'Please complete all required fields.' };
+    }
+
+    const exists = users.some(
+      (u) =>
+        u.email.toLowerCase() === cleanEmail ||
+        u.studentIdNumber.toLowerCase() === cleanId.toLowerCase()
+    );
+    if (exists) {
       return {
         success: false,
-        qrToken: '',
-        pinCode: '',
-        message: `Insufficient USTP E-Wallet balance. Required: ₱${totalCost.toFixed(2)}, Available: ₱${currentUser.walletBalance.toFixed(2)}. Please top up or use coins.`,
+        error: 'An account with this email or USTP ID already exists.',
       };
     }
 
-    const pinCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const qrToken = `USTP-LOCKER-${comp.id}-SEC-${pinCode}`;
-    const startTime = new Date().toISOString();
-    const endTime = new Date(Date.now() + durationHours * 60 * 60 * 1000).toISOString();
-    const baseWatts = comp.size === 'large' ? 55 : 25;
-
-    const newSession: ActiveSession = {
-      sessionId: `sess-${Date.now()}`,
-      userId: currentUser.id,
-      userName: currentUser.name,
-      studentId: currentUser.studentId,
-      startTime,
-      endTime,
-      durationMinutes: durationHours * 60,
-      pinCode,
-      qrToken,
-      paymentMethod,
-      amountPaid: totalCost,
-      currentWatts: baseWatts,
-      voltage: station.voltage,
-      deviceType,
+    const newStudent: UserAccount = {
+      id: `usr_ustp_${Date.now()}`,
+      name: name.trim(),
+      studentIdNumber: cleanId,
+      email: cleanEmail,
+      password,
+      role: 'student',
+      college: college || 'College of Information Technology and Computing (CITC)',
+      degree: 'BS Information Technology',
+      avatar: '',
+      walletBalance: 0,
+      biometricEnabled: false,
+      pushNotifications: true,
+      overchargeAlerts: true,
+      preferredPayment: 'wallet',
+      createdAt: new Date().toISOString().split('T')[0],
     };
 
-    setStations(prev =>
-      prev.map(st => {
-        if (st.id !== stationId) return st;
-        return {
-          ...st,
-          digitalRevenue: paymentMethod === 'wallet' ? st.digitalRevenue + totalCost : st.digitalRevenue,
-          coinRevenue: paymentMethod === 'coins' ? st.coinRevenue + totalCost : st.coinRevenue,
-          coinHopperCount: paymentMethod === 'coins' ? Math.min(st.coinHopperCapacity, st.coinHopperCount + Math.floor(totalCost / 5)) : st.coinHopperCount,
-          compartments: st.compartments.map(c => {
-            if (c.compartmentNumber !== compartmentNumber) return c;
-            return {
-              ...c,
-              status: 'in_use',
-              lockStatus: 'locked',
-              currentPowerDrawWatts: baseWatts,
-              totalUsageCycles: c.totalUsageCycles + 1,
-              currentSession: newSession,
-            };
-          }),
-        };
-      })
-    );
+    setUsers((prev) => [...prev, newStudent]);
+    setSessionsByUserId((prev) => ({ ...prev, [newStudent.id]: null }));
+    setHistoryByUserId((prev) => ({ ...prev, [newStudent.id]: [] }));
+    setAccessDeniedMessage(null);
+    setCurrentUser(newStudent);
+    setCurrentRoute('/student/dashboard');
+    if (typeof window !== 'undefined') {
+      window.history.pushState({}, '', '/student/dashboard');
+    }
+    return { success: true, user: newStudent };
+  };
 
-    if (paymentMethod === 'wallet') {
-      setCurrentUser(prev => ({
-        ...prev,
-        walletBalance: prev.walletBalance - totalCost,
+  const loginDemo = () => {
+    loginDemoByEmail('jastinalberca8@gmail.com');
+  };
+
+  const loginWithCredentials = (studentId: string, email: string): boolean => {
+    const matched = users.find(
+      (u) =>
+        u.email.toLowerCase() === email.trim().toLowerCase() ||
+        u.studentIdNumber.toLowerCase() === studentId.trim().toLowerCase()
+    );
+    if (matched) {
+      loginWithAccount(matched.email, matched.password);
+      return true;
+    }
+    return false;
+  };
+
+  const logout = () => {
+    sound.playTap();
+    setAccessDeniedMessage(null);
+    setPendingUnlockToken(null);
+    setCurrentUser(null);
+    setCurrentRoute('/login');
+    if (typeof window !== 'undefined') {
+      window.history.pushState({}, '', '/login');
+    }
+  };
+
+  const updateCurrentUserState = (updater: (user: UserAccount) => UserAccount) => {
+    if (!currentUser) return;
+    const updated = updater(currentUser);
+    setCurrentUser(updated);
+    setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
+  };
+
+  // STEP 1 of Secure IoT Unlock: Generate time-sensitive 60s QR / 6-digit PIN (DOES NOT pop latch remotely!)
+  const generateUnlockToken = (
+    paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash'
+  ): { success: boolean; message: string; token?: PendingUnlockToken } => {
+    sound.playTap();
+
+    const slotToBook =
+      selectedSlot ||
+      selectedStation.slots.find((s) => s.status === 'available') ||
+      selectedStation.slots[0];
+
+    if (!slotToBook || slotToBook.status !== 'available') {
+      return {
+        success: false,
+        message: 'Selected compartment is no longer available. Please choose a free compartment.',
+      };
+    }
+
+    const fee = calculateFee(selectedSize, selectedDuration, selectedService);
+
+    if (paymentMethod === 'wallet' && student.walletBalance < fee) {
+      return {
+        success: false,
+        message: `Insufficient campus e-wallet balance (₱${student.walletBalance.toFixed(
+          2
+        )}). Please reload ₱ or choose GCash/Maya/Coin Slot.`,
+      };
+    }
+
+    const now = Date.now();
+    const randomPin = String(Math.floor(100000 + Math.random() * 900000));
+    const tokenId = `TOK-${Math.floor(10000 + Math.random() * 90000)}`;
+    const token: PendingUnlockToken = {
+      tokenId,
+      stationId: selectedStation.id,
+      stationName: selectedStation.name,
+      stationCode: selectedStation.campusCode,
+      slotNumber: slotToBook.slotNumber,
+      serviceType: selectedService,
+      compartmentSize: selectedSize,
+      durationMinutes: selectedDuration,
+      totalFee: fee,
+      paymentMethod,
+      qrPayload: `UNICHARGE|${selectedStation.campusCode}|SLOT-${slotToBook.slotNumber}|PIN-${randomPin}|${tokenId}`,
+      pinCode: randomPin,
+      createdAt: now,
+      expiresAt: now + 60 * 1000,
+    };
+
+    setPendingUnlockToken(token);
+    setHardwareKioskStationId(selectedStation.id);
+
+    return {
+      success: true,
+      message: `QR Unlock Token generated for ${selectedStation.name} Slot #${slotToBook.slotNumber}. Scan at the physical kiosk within 60 seconds.`,
+      token,
+    };
+  };
+
+  const regenerateUnlockToken = () => {
+    if (!pendingUnlockToken) return;
+    generateUnlockToken(pendingUnlockToken.paymentMethod);
+  };
+
+  const cancelPendingUnlock = () => {
+    sound.playTap();
+    setPendingUnlockToken(null);
+  };
+
+  // STEP 2 of Secure IoT Unlock: Triggered ONLY when physical kiosk scanner/PIN pad verifies the token!
+  const verifyKioskUnlock = (
+    pinOrQrPayload: string,
+    kioskStationId?: string
+  ): { success: boolean; message: string } => {
+    sound.playBeep();
+
+    if (!pendingUnlockToken) {
+      return {
+        success: false,
+        message: 'No pending QR unlock authorization found. Generate an unlock QR from Reserve a Locker first.',
+      };
+    }
+
+    if (Date.now() > pendingUnlockToken.expiresAt) {
+      return {
+        success: false,
+        message: 'QR verification token expired (60s limit). Please regenerate a fresh Unlock QR.',
+      };
+    }
+
+    const targetKioskId = kioskStationId || hardwareKioskStationId;
+    if (targetKioskId !== pendingUnlockToken.stationId) {
+      return {
+        success: false,
+        message: `Wrong kiosk! This QR authorizes ${pendingUnlockToken.stationName} (${pendingUnlockToken.stationCode}). Switch the kiosk simulator to ${pendingUnlockToken.stationCode} to scan.`,
+      };
+    }
+
+    const cleaned = pinOrQrPayload.trim();
+    const matchesToken =
+      cleaned === pendingUnlockToken.pinCode ||
+      cleaned === pendingUnlockToken.qrPayload ||
+      cleaned === pendingUnlockToken.tokenId;
+
+    if (!matchesToken) {
+      return {
+        success: false,
+        message: 'Invalid QR code or 6-digit PIN. Hold your active UniCharge QR directly to the scanner.',
+      };
+    }
+
+    if (pendingUnlockToken.paymentMethod === 'wallet') {
+      if (student.walletBalance < pendingUnlockToken.totalFee) {
+        return {
+          success: false,
+          message: `Insufficient wallet balance (₱${student.walletBalance.toFixed(2)}).`,
+        };
+      }
+      updateCurrentUserState((u) => ({
+        ...u,
+        walletBalance: u.walletBalance - pendingUnlockToken.totalFee,
       }));
     }
 
-    const newTxn: TransactionRecord = {
-      id: `TXN-${Math.floor(10000 + Math.random() * 90000)}`,
-      timestamp: 'Just now',
-      stationId,
-      stationName: station.name,
-      compartmentNumber,
-      durationMinutes: durationHours * 60,
-      amount: totalCost,
-      paymentMethod,
-      status: 'active',
-      receiptRef: `USTP-${paymentMethod.toUpperCase()}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(1000 + Math.random() * 9000)}`,
-      description: `Locker #${compartmentNumber} (${durationHours}h Reservation)`,
-    };
-    setTransactions(prev => [newTxn, ...prev]);
+    // Fire physical ESP32 solenoid latch ONLY after kiosk scan verification!
+    sound.playSolenoidRelease();
+    setTimeout(() => {
+      sound.playChargingConnected();
+    }, 450);
 
-    return {
-      success: true,
-      qrToken,
-      pinCode,
-      message: `Compartment #${compartmentNumber} reserved! Scan QR or use PIN ${pinCode} at kiosk to unlock.`,
-    };
-  };
-
-  const extendSession = (compartmentId: string, additionalMinutes: number) => {
-    const cost = (additionalMinutes / 60) * 10;
-    if (currentUser.walletBalance < cost) {
-      return { success: false, message: `Insufficient balance (₱${cost.toFixed(2)} needed). Please top up first.` };
-    }
-
-    let found = false;
-    setStations(prev =>
-      prev.map(st => ({
-        ...st,
-        digitalRevenue: st.digitalRevenue + cost,
-        compartments: st.compartments.map(c => {
-          if (c.id === compartmentId && c.currentSession) {
-            found = true;
-            const currentEnd = new Date(c.currentSession.endTime).getTime();
-            const newEnd = new Date(currentEnd + additionalMinutes * 60 * 1000).toISOString();
-            return {
-              ...c,
-              currentSession: {
-                ...c.currentSession,
-                endTime: newEnd,
-                durationMinutes: c.currentSession.durationMinutes + additionalMinutes,
-                amountPaid: c.currentSession.amountPaid + cost,
-              },
-            };
-          }
-          return c;
-        }),
-      }))
-    );
-
-    if (found) {
-      setCurrentUser(prev => ({ ...prev, walletBalance: prev.walletBalance - cost }));
-      return { success: true, message: `Session extended by +${additionalMinutes} mins. ₱${cost.toFixed(2)} deducted.` };
-    }
-    return { success: false, message: 'Active session not found.' };
-  };
-
-  const unlockAndEndSession = (compartmentId: string) => {
-    let targetSession: ActiveSession | undefined;
-    let targetStation: LockerStation | undefined;
-    let targetComp: LockerCompartment | undefined;
-
-    stations.forEach(st => {
-      const c = st.compartments.find(comp => comp.id === compartmentId);
-      if (c && c.currentSession) {
-        targetComp = c;
-        targetStation = st;
-        targetSession = c.currentSession;
-      }
-    });
-
-    if (!targetComp || !targetSession) {
-      return { success: false, message: 'No active session found for this compartment.' };
-    }
-
-    setStations(prev =>
-      prev.map(st => {
-        if (st.id !== targetStation?.id) return st;
-        return {
-          ...st,
-          compartments: st.compartments.map(c => {
-            if (c.id !== compartmentId) return c;
-            return {
-              ...c,
-              status: 'available',
-              lockStatus: 'unlocked',
-              currentPowerDrawWatts: 0,
-              currentSession: undefined,
-            };
-          }),
-        };
-      })
-    );
-
-    setTransactions(prev =>
-      prev.map(t =>
-        t.compartmentNumber === targetComp?.compartmentNumber && t.stationId === targetStation?.id && t.status === 'active'
-          ? { ...t, status: 'completed' }
-          : t
-      )
-    );
-
-    return {
-      success: true,
-      message: `Compartment ${targetComp.id} unlocked! Please retrieve your devices. Door latch reset to available.`,
-    };
-  };
-
-  const topUpWallet = (amount: number, method: string) => {
-    setCurrentUser(prev => ({
-      ...prev,
-      walletBalance: prev.walletBalance + amount,
-    }));
-    const newTxn: TransactionRecord = {
-      id: `TOPUP-${Date.now().toString().slice(-5)}`,
-      timestamp: 'Just now',
-      stationId: 'ONLINE-PORTAL',
-      stationName: `Online Top-up (${method})`,
-      compartmentNumber: 0,
-      durationMinutes: 0,
-      amount,
-      paymentMethod: 'wallet',
-      status: 'completed',
-      receiptRef: `USTP-TOP-${Date.now()}`,
-      description: `E-Wallet Reload via ${method}`,
-    };
-    setTransactions(prev => [newTxn, ...prev]);
-  };
-
-  const remoteForceUnlock = (compartmentId: string, adminKey: string) => {
-    if (!adminKey || adminKey.trim().length < 4) {
-      return { success: false, message: 'Invalid Admin Security Authorization Key.' };
-    }
-
-    let found = false;
-    let stationName = '';
-    let compNum = 0;
-
-    setStations(prev =>
-      prev.map(st => {
-        const c = st.compartments.find(comp => comp.id === compartmentId);
-        if (c) {
-          found = true;
-          stationName = st.name;
-          compNum = c.compartmentNumber;
-          return {
-            ...st,
-            compartments: st.compartments.map(comp =>
-              comp.id === compartmentId
-                ? {
-                    ...comp,
-                    lockStatus: 'unlocked',
-                    status: 'available',
-                    currentPowerDrawWatts: 0,
-                    currentSession: undefined,
-                    tamperAlertMessage: undefined,
-                  }
-                : comp
-            ),
-          };
+    setStations((prevStations) =>
+      prevStations.map((st) => {
+        if (st.id === pendingUnlockToken.stationId) {
+          const updatedSlots = st.slots.map((s) =>
+            s.slotNumber === pendingUnlockToken.slotNumber
+              ? { ...s, status: 'in_use' as const, isDoorOpen: true, isLocked: false }
+              : s
+          );
+          const availableCount = updatedSlots.filter((s) => s.status === 'available').length;
+          return { ...st, slots: updatedSlots, availableSlots: availableCount };
         }
         return st;
       })
     );
 
-    if (found) {
-      const newAlert: TamperAlertEvent = {
-        id: `SEC-OVERRIDE-${Date.now()}`,
-        timestamp: 'Just now',
-        stationId: 'SYSTEM',
-        stationName,
-        compartmentId,
-        compartmentNumber: compNum,
-        severity: 'info',
-        type: 'forced_door',
-        message: `Remote force unlock executed by Campus Admin (${currentAdmin.name}). Door solenoid disengaged.`,
-        isResolved: true,
-        resolvedAt: 'Just now',
-        resolvedBy: currentAdmin.name,
-      };
-      setAlerts(prev => [newAlert, ...prev]);
+    setHardwareKioskStationId(pendingUnlockToken.stationId);
+    setIsKioskDoorOpen(true);
+    setActiveKioskSlotReleased(pendingUnlockToken.slotNumber);
 
-      return { success: true, message: `Emergency unlock command sent to ${compartmentId}. Solenoid released.` };
+    const targetStation =
+      stations.find((s) => s.id === pendingUnlockToken.stationId) || selectedStation;
+
+    const newSession: ActiveSession = {
+      sessionId: `USTP-SES-${Math.floor(10000 + Math.random() * 90000)}`,
+      stationId: pendingUnlockToken.stationId,
+      stationName: pendingUnlockToken.stationName,
+      building: targetStation.building,
+      slotNumber: pendingUnlockToken.slotNumber,
+      serviceType: pendingUnlockToken.serviceType,
+      compartmentSize: pendingUnlockToken.compartmentSize,
+      startTime: Date.now(),
+      durationMinutes: pendingUnlockToken.durationMinutes,
+      remainingSeconds: pendingUnlockToken.durationMinutes * 60,
+      totalFee: pendingUnlockToken.totalFee,
+      batteryInitial: 38,
+      batteryCurrent: 38,
+      chargingRateWatts: pendingUnlockToken.serviceType === 'storage' ? 0 : 58.4,
+      lockerTemperature: 28.6,
+      isOverchargeProtectionActive: true,
+      isTamperAlertArmed: true,
+      status: 'active',
+      qrVerificationCode: pendingUnlockToken.qrPayload,
+    };
+
+    setActiveSessionForCurrentUser(newSession);
+    setPendingUnlockToken(null);
+
+    confetti({
+      particleCount: 55,
+      spread: 60,
+      origin: { y: 0.6 },
+      colors: ['#5BC496', '#4E6E81', '#FFFFFF'],
+    });
+
+    return {
+      success: true,
+      message: `Kiosk Verified! Compartment #${newSession.slotNumber} Solenoid Unlatched at ${newSession.stationName}.`,
+    };
+  };
+
+  // Used by the Expo Mobile Companion camera QR scanner screen (the phone scanning the kiosk's display QR)
+  const unlockStationViaQr = (
+    qrCode: string,
+    paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash'
+  ): { success: boolean; message: string } => {
+    sound.playBeep();
+
+    const slotToBook =
+      selectedSlot ||
+      selectedStation.slots.find((s) => s.status === 'available') ||
+      selectedStation.slots[0];
+    const fee = calculateFee(selectedSize, selectedDuration, selectedService);
+
+    if (paymentMethod === 'wallet') {
+      if (student.walletBalance < fee) {
+        return {
+          success: false,
+          message: `Insufficient campus e-wallet balance (₱${student.walletBalance.toFixed(
+            2
+          )}). Please top up or choose GCash/Maya.`,
+        };
+      }
+      updateCurrentUserState((u) => ({ ...u, walletBalance: u.walletBalance - fee }));
     }
-    return { success: false, message: 'Compartment not found.' };
+
+    sound.playSolenoidRelease();
+    setTimeout(() => {
+      sound.playChargingConnected();
+    }, 450);
+
+    setStations((prevStations) =>
+      prevStations.map((st) => {
+        if (st.id === selectedStation.id) {
+          const updatedSlots = st.slots.map((s) =>
+            s.slotNumber === slotToBook.slotNumber
+              ? { ...s, status: 'in_use' as const, isDoorOpen: true, isLocked: false }
+              : s
+          );
+          const availableCount = updatedSlots.filter((s) => s.status === 'available').length;
+          return { ...st, slots: updatedSlots, availableSlots: availableCount };
+        }
+        return st;
+      })
+    );
+
+    setHardwareKioskStationId(selectedStation.id);
+    setIsKioskDoorOpen(true);
+    setActiveKioskSlotReleased(slotToBook.slotNumber);
+
+    const newSession: ActiveSession = {
+      sessionId: `USTP-SES-${Math.floor(10000 + Math.random() * 90000)}`,
+      stationId: selectedStation.id,
+      stationName: selectedStation.name,
+      building: selectedStation.building,
+      slotNumber: slotToBook.slotNumber,
+      serviceType: selectedService,
+      compartmentSize: selectedSize,
+      startTime: Date.now(),
+      durationMinutes: selectedDuration,
+      remainingSeconds: selectedDuration * 60,
+      totalFee: fee,
+      batteryInitial: 38,
+      batteryCurrent: 38,
+      chargingRateWatts: selectedService === 'storage' ? 0 : 58.4,
+      lockerTemperature: 28.6,
+      isOverchargeProtectionActive: true,
+      isTamperAlertArmed: true,
+      status: 'active',
+      qrVerificationCode:
+        qrCode || `${selectedStation.campusCode}-SLOT${slotToBook.slotNumber}-AUTH`,
+    };
+
+    setActiveSessionForCurrentUser(newSession);
+
+    confetti({
+      particleCount: 50,
+      spread: 60,
+      origin: { y: 0.6 },
+      colors: ['#5BC496', '#4E6E81', '#FFFFFF'],
+    });
+
+    return {
+      success: true,
+      message: `Compartment #${slotToBook.slotNumber} Solenoid Unlatched! Please place your belongings and plug in the cable.`,
+    };
   };
 
-  const resolveAlert = (alertId: string, resolvedBy: string) => {
-    setAlerts(prev =>
-      prev.map(a =>
-        a.id === alertId
+  const endActiveSession = (): { success: boolean; message: string } => {
+    if (!activeSession) return { success: false, message: 'No active session' };
+
+    sound.playSolenoidRelease();
+    setHardwareKioskStationId(activeSession.stationId);
+    setIsKioskDoorOpen(true);
+    setActiveKioskSlotReleased(activeSession.slotNumber);
+
+    setStations((prevStations) =>
+      prevStations.map((st) => {
+        if (st.id === activeSession.stationId) {
+          const updatedSlots = st.slots.map((s) =>
+            s.slotNumber === activeSession.slotNumber
+              ? { ...s, status: 'available' as const, isDoorOpen: true, isLocked: false }
+              : s
+          );
+          const availableCount = updatedSlots.filter((s) => s.status === 'available').length;
+          return { ...st, slots: updatedSlots, availableSlots: availableCount };
+        }
+        return st;
+      })
+    );
+
+    const historyEntry: SessionHistoryItem = {
+      id: `hist-${Date.now()}`,
+      receiptNumber: `USTP-REC-${Math.floor(100000 + Math.random() * 900000)}`,
+      date: 'Just now',
+      stationName: activeSession.stationName,
+      slotNumber: activeSession.slotNumber,
+      durationMinutes: activeSession.durationMinutes,
+      totalFee: activeSession.totalFee,
+      serviceType: activeSession.serviceType,
+      compartmentSize: activeSession.compartmentSize,
+      status: 'Completed',
+    };
+
+    if (currentUser) {
+      const uid = currentUser.id;
+      setHistoryByUserId((prevMap) => ({
+        ...prevMap,
+        [uid]: [historyEntry, ...(prevMap[uid] ?? [])],
+      }));
+    }
+    setActiveSessionForCurrentUser(null);
+
+    confetti({
+      particleCount: 75,
+      spread: 70,
+      origin: { y: 0.5 },
+      colors: ['#5BC496', '#4E6E81', '#FFFFFF'],
+    });
+
+    return {
+      success: true,
+      message: `Compartment #${historyEntry.slotNumber} unlocked! Please retrieve your device. Thank you for using UniCharge USTP!`,
+    };
+  };
+
+  const closeKioskDoor = (slotNumber: number) => {
+    sound.playTap();
+    setIsKioskDoorOpen(false);
+    setActiveKioskSlotReleased(null);
+
+    setStations((prevStations) =>
+      prevStations.map((st) => {
+        if (st.id === hardwareKioskStationId) {
+          const updatedSlots = st.slots.map((s) =>
+            s.slotNumber === slotNumber ? { ...s, isDoorOpen: false, isLocked: true } : s
+          );
+          return { ...st, slots: updatedSlots };
+        }
+        return st;
+      })
+    );
+  };
+
+  const topUpWallet = (amount: number) => {
+    sound.playTap();
+    updateCurrentUserState((u) => ({ ...u, walletBalance: u.walletBalance + amount }));
+    confetti({
+      particleCount: 30,
+      spread: 50,
+      origin: { y: 0.7 },
+      colors: ['#5BC496', '#4E6E81'],
+    });
+  };
+
+  const toggleBiometrics = () => {
+    sound.playTap();
+    updateCurrentUserState((u) => ({ ...u, biometricEnabled: !u.biometricEnabled }));
+  };
+
+  const togglePushNotifications = () => {
+    sound.playTap();
+    updateCurrentUserState((u) => ({ ...u, pushNotifications: !u.pushNotifications }));
+  };
+
+  const toggleOverchargeProtection = () => {
+    sound.playTap();
+    updateCurrentUserState((u) => ({ ...u, overchargeAlerts: !u.overchargeAlerts }));
+    if (activeSession) {
+      setActiveSessionForCurrentUser((prev) =>
+        prev
+          ? { ...prev, isOverchargeProtectionActive: !prev.isOverchargeProtectionActive }
+          : null
+      );
+    }
+  };
+
+  const updateUserProfile = (updates: {
+    name?: string;
+    college?: string;
+    degree?: string;
+    avatar?: string;
+  }) => {
+    updateCurrentUserState((u) => ({
+      ...u,
+      ...(updates.name !== undefined ? { name: updates.name } : {}),
+      ...(updates.college !== undefined ? { college: updates.college } : {}),
+      ...(updates.degree !== undefined ? { degree: updates.degree } : {}),
+      ...(updates.avatar !== undefined ? { avatar: updates.avatar } : {}),
+    }));
+  };
+
+  const triggerSimulatedTamper = () => {
+    sound.playTamperAlarm();
+    if (activeSession) {
+      setActiveSessionForCurrentUser((prev) =>
+        prev
           ? {
-              ...a,
-              isResolved: true,
-              resolvedAt: 'Just now',
-              resolvedBy,
+              ...prev,
+              isTamperAlertArmed: true,
+              lockerTemperature: +(prev.lockerTemperature + 3.2).toFixed(1),
             }
-          : a
+          : null
+      );
+      setSecurityAlerts((prev) => [
+        {
+          id: `alt-${Date.now()}`,
+          timestamp: 'Just now',
+          stationCode: 'USTP-CITC-K01',
+          stationName: activeSession.stationName,
+          slotNumber: activeSession.slotNumber,
+          severity: 'critical',
+          type: 'Tamper Vibration',
+          message: `Triaxial accelerometer threshold triggered on Slot #${activeSession.slotNumber}.`,
+          resolved: false,
+        },
+        ...prev,
+      ]);
+    }
+  };
+
+  const adminRemoteUnlockSlot = (stationId: string, slotNumber: number) => {
+    if (currentUser?.role !== 'admin') return;
+    sound.playSolenoidRelease();
+    setHardwareKioskStationId(stationId);
+    setIsKioskDoorOpen(true);
+    setActiveKioskSlotReleased(slotNumber);
+
+    setStations((prev) =>
+      prev.map((st) => {
+        if (st.id !== stationId) return st;
+        const updatedSlots = st.slots.map((s) =>
+          s.slotNumber === slotNumber
+            ? { ...s, status: 'available' as const, isDoorOpen: true, isLocked: false }
+            : s
+        );
+        return {
+          ...st,
+          slots: updatedSlots,
+          availableSlots: updatedSlots.filter((s) => s.status === 'available').length,
+        };
+      })
+    );
+  };
+
+  const adminToggleSlotMaintenance = (stationId: string, slotNumber: number) => {
+    if (currentUser?.role !== 'admin') return;
+    sound.playTap();
+    setStations((prev) =>
+      prev.map((st) => {
+        if (st.id !== stationId) return st;
+        const updatedSlots = st.slots.map((s) => {
+          if (s.slotNumber !== slotNumber) return s;
+          const nextStatus = s.status === 'maintenance' ? 'available' : 'maintenance';
+          return { ...s, status: nextStatus as LockerSlot['status'] };
+        });
+        return {
+          ...st,
+          slots: updatedSlots,
+          availableSlots: updatedSlots.filter((s) => s.status === 'available').length,
+        };
+      })
+    );
+  };
+
+  const adminProvisionStaff = ({
+    name,
+    email,
+    staffId,
+    password,
+  }: {
+    name: string;
+    email: string;
+    staffId: string;
+    password: string;
+  }): AuthResult => {
+    if (currentUser?.role !== 'admin') {
+      return { success: false, error: 'Unauthorized: Admin role required.' };
+    }
+    const cleanEmail = email.trim().toLowerCase();
+    if (!name.trim() || !cleanEmail || !staffId.trim() || !password) {
+      return { success: false, error: 'All staff provisioning fields are required.' };
+    }
+    if (
+      users.some(
+        (u) =>
+          u.email.toLowerCase() === cleanEmail ||
+          u.studentIdNumber.toLowerCase() === staffId.trim().toLowerCase()
       )
-    );
+    ) {
+      return { success: false, error: 'Staff email or ID already exists.' };
+    }
+
+    const newAdmin: UserAccount = {
+      id: `usr_admin_${Date.now()}`,
+      name: name.trim(),
+      studentIdNumber: staffId.trim().toUpperCase(),
+      email: cleanEmail,
+      password,
+      role: 'admin',
+      college: 'USTP ICT Infrastructure & Smart Campus Operations',
+      degree: 'Station Operations Staff',
+      avatar: '',
+      walletBalance: 0,
+      biometricEnabled: true,
+      pushNotifications: true,
+      overchargeAlerts: true,
+      preferredPayment: 'wallet',
+      createdAt: new Date().toISOString().split('T')[0],
+    };
+
+    setUsers((prev) => [newAdmin, ...prev]);
+    return { success: true, user: newAdmin };
   };
 
-  const toggleStationMaintenance = (stationId: string) => {
-    setStations(prev =>
-      prev.map(st =>
-        st.id === stationId
-          ? {
-              ...st,
-              status: st.status === 'online' ? 'maintenance' : 'online',
-            }
-          : st
-      )
-    );
-  };
-
-  const toggleCompartmentMaintenance = (stationId: string, compartmentNumber: number) => {
-    setStations(prev =>
-      prev.map(st => {
-        if (st.id !== stationId) return st;
-        return {
-          ...st,
-          compartments: st.compartments.map(c =>
-            c.compartmentNumber === compartmentNumber
-              ? {
-                  ...c,
-                  status: c.status === 'maintenance' ? 'available' : 'maintenance',
-                  lockStatus: 'locked',
-                }
-              : c
-          ),
-        };
-      })
-    );
-  };
-
-  const insertCoinAtKiosk = (stationId: string, coinValue: number) => {
-    setStations(prev =>
-      prev.map(st => {
-        if (st.id !== stationId) return st;
-        const newCount = Math.min(st.coinHopperCapacity, st.coinHopperCount + 1);
-        return {
-          ...st,
-          coinRevenue: st.coinRevenue + coinValue,
-          coinHopperCount: newCount,
-        };
-      })
-    );
-  };
-
-  const emptyCoinHopper = (stationId: string) => {
-    setStations(prev =>
-      prev.map(st => {
-        if (st.id !== stationId) return st;
-        return {
-          ...st,
-          coinHopperCount: 0,
-        };
-      })
-    );
-  };
-
-  const rebootStationGateway = (stationId: string) => {
-    setStations(prev =>
-      prev.map(st => {
-        if (st.id !== stationId) return st;
-        return {
-          ...st,
-          esp32Status: 'online',
-          lastHeartbeat: 'Just rebooted',
-        };
-      })
-    );
-  };
-
-  const emergencyFanOverride = (stationId: string) => {
-    setStations(prev =>
-      prev.map(st => {
-        if (st.id !== stationId) return st;
-        return {
-          ...st,
-          fanSpeedRpm: 3200,
-          temperature: Math.max(24, st.temperature - 3.2),
-        };
-      })
+  const resolveSecurityAlert = (alertId: string) => {
+    if (currentUser?.role !== 'admin') return;
+    sound.playTap();
+    setSecurityAlerts((prev) =>
+      prev.map((a) => (a.id === alertId ? { ...a, resolved: true } : a))
     );
   };
 
   return (
     <UniChargeContext.Provider
       value={{
-        currentRoute,
-        setCurrentRoute,
-        authRole,
-        setAuthRole,
-        activeStudentTab,
-        setActiveStudentTab,
-        activeAdminTab,
-        setActiveAdminTab,
+        isAuthenticated,
         currentUser,
-        setCurrentUser,
-        currentAdmin,
-        studentsList,
-        loginAsStudent,
-        loginAsAdmin,
-        signUpStudent,
-        logout,
+        student,
+        users,
+        currentRoute,
+        accessDeniedMessage,
+        clearAccessDenied,
+        navigate,
         stations,
-        activeStationId,
-        setActiveStationId,
         selectedStation,
-        selectedCompartment,
-        setSelectedCompartment,
-        transactions,
-        alerts,
-        isKioskModalOpen,
-        setIsKioskModalOpen,
-        kioskInitialStationId,
-        setKioskInitialStationId,
-        isBookingModalOpen,
-        setIsBookingModalOpen,
-        bookingTarget,
-        setBookingTarget,
-        receiptModalData,
-        setReceiptModalData,
-        bookLocker,
-        extendSession,
-        unlockAndEndSession,
+        selectedSlot,
+        selectedService,
+        selectedSize,
+        selectedDuration,
+        activeSession,
+        pendingUnlockToken,
+        pendingSecondsLeft,
+        sessionHistory,
+        securityAlerts,
+        hardwareKioskStationId,
+        isKioskDoorOpen,
+        activeKioskSlotReleased,
+        loginWithAccount,
+        loginDemoByEmail,
+        registerStudentAccount,
+        loginDemo,
+        loginWithCredentials,
+        logout,
+        setSelectedStation,
+        setSelectedSlot,
+        setSelectedService,
+        setSelectedSize,
+        setSelectedDuration,
+        calculateFee,
+        generateUnlockToken,
+        regenerateUnlockToken,
+        cancelPendingUnlock,
+        verifyKioskUnlock,
+        unlockStationViaQr,
+        endActiveSession,
         topUpWallet,
-        remoteForceUnlock,
-        resolveAlert,
-        toggleStationMaintenance,
-        toggleCompartmentMaintenance,
-        insertCoinAtKiosk,
-        emptyCoinHopper,
-        rebootStationGateway,
-        emergencyFanOverride,
-        activeUserSessions,
-        currentView: currentRoute === 'student-dashboard' ? 'dashboard' : currentRoute === 'admin-dashboard' ? 'admin' : 'landing',
-        setCurrentView: (v: any) => setCurrentRoute(v === 'dashboard' ? 'student-dashboard' : v === 'admin' ? 'admin-dashboard' : 'login'),
-        theme: 'light',
-        toggleTheme: () => {},
+        toggleBiometrics,
+        togglePushNotifications,
+        toggleOverchargeProtection,
+        updateUserProfile,
+        closeKioskDoor,
+        triggerSimulatedTamper,
+        setHardwareKioskStationId,
+        adminRemoteUnlockSlot,
+        adminToggleSlotMaintenance,
+        adminProvisionStaff,
+        resolveSecurityAlert,
       }}
     >
       {children}

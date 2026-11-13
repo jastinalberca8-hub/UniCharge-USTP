@@ -1,111 +1,121 @@
-export type LockerSize = 'standard' | 'large';
-export type CompartmentStatus = 'available' | 'in_use' | 'tamper_alert' | 'maintenance';
-export type LockState = 'locked' | 'unlocked';
-export type PaymentMethod = 'wallet' | 'coins';
-export type AuthRole = 'student' | 'admin';
-export type AuthView = 'login' | 'signup' | 'forgot-password';
-export type StudentTab = 'dashboard' | 'stations' | 'sessions' | 'wallet';
-export type AdminTab = 'overview' | 'telemetry' | 'security' | 'revenue';
+export type UserRole = 'student' | 'admin';
+
+export type LockerSize = 'S' | 'M' | 'L';
+
+export type LockerStatus = 'available' | 'in_use' | 'maintenance';
+
+export type ServiceType = 'charging' | 'storage' | 'both';
+
+export interface LockerSlot {
+  id: string;
+  slotNumber: number;
+  size: LockerSize;
+  status: LockerStatus;
+  chargingPower: string;
+  currentTemp: number;
+  isDoorOpen: boolean;
+  isLocked: boolean;
+}
+
+export interface KioskStation {
+  id: string;
+  name: string;
+  campusCode: string;
+  building: string;
+  floor: string;
+  walkMinutes: number;
+  distanceMeters: number;
+  totalSlots: number;
+  availableSlots: number;
+  slots: LockerSlot[];
+  mapCoords: { x: number; y: number };
+  coordinates: { lat: number; lng: number };
+  image: string;
+  isPopular?: boolean;
+  online: boolean;
+  powerDrawWatts: number;
+}
+
+export interface PendingUnlockToken {
+  tokenId: string;
+  stationId: string;
+  stationName: string;
+  stationCode: string;
+  slotNumber: number;
+  serviceType: ServiceType;
+  compartmentSize: LockerSize;
+  durationMinutes: number;
+  totalFee: number;
+  paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash';
+  qrPayload: string;
+  pinCode: string;
+  createdAt: number;
+  expiresAt: number;
+}
 
 export interface ActiveSession {
   sessionId: string;
-  userId: string;
-  userName: string;
-  studentId: string;
-  startTime: string;
-  endTime: string;
-  durationMinutes: number;
-  pinCode: string;
-  qrToken: string;
-  paymentMethod: PaymentMethod;
-  amountPaid: number;
-  currentWatts: number;
-  voltage: number;
-  deviceType?: string;
-}
-
-export interface LockerCompartment {
-  id: string; // e.g. "LIB-01"
-  compartmentNumber: number;
   stationId: string;
-  size: LockerSize;
-  status: CompartmentStatus;
-  lockStatus: LockState;
-  currentPowerDrawWatts: number;
-  temperature: number;
-  totalUsageCycles: number;
-  currentSession?: ActiveSession;
-  tamperAlertMessage?: string;
+  stationName: string;
+  building: string;
+  slotNumber: number;
+  serviceType: ServiceType;
+  compartmentSize: LockerSize;
+  startTime: number;
+  durationMinutes: number;
+  remainingSeconds: number;
+  totalFee: number;
+  batteryInitial: number;
+  batteryCurrent: number;
+  chargingRateWatts: number;
+  lockerTemperature: number;
+  isOverchargeProtectionActive: boolean;
+  isTamperAlertArmed: boolean;
+  status: 'active' | 'completed' | 'retrieved';
+  qrVerificationCode: string;
 }
 
-export interface LockerStation {
+export interface UserAccount {
   id: string;
   name: string;
-  buildingCode: string;
-  campusZone: string;
-  locationDetails: string;
-  status: 'online' | 'offline' | 'maintenance';
-  voltage: number;
-  temperature: number;
-  fanSpeedRpm: number;
-  coinHopperCount: number;
-  coinHopperCapacity: number;
-  digitalRevenue: number;
-  coinRevenue: number;
-  lastHeartbeat: string;
-  ipAddress: string;
-  esp32Status: 'online' | 'offline';
-  outputStabilityPercent: number;
-  relayArmed: boolean;
-  compartments: LockerCompartment[];
-}
-
-export interface StudentUser {
-  id: string;
-  name: string;
-  studentId: string;
+  studentIdNumber: string;
   email: string;
+  password: string;
+  role: UserRole;
   college: string;
-  program: string;
+  degree: string;
+  avatar: string;
   walletBalance: number;
-  campusCardRfid: string;
-  avatarUrl?: string;
+  biometricEnabled: boolean;
+  pushNotifications: boolean;
+  overchargeAlerts: boolean;
+  preferredPayment: 'wallet' | 'gcash' | 'maya';
+  createdAt: string;
 }
 
-export interface AdminUser {
-  id: string;
-  name: string;
-  employeeId: string;
-  email: string;
-  department: string;
-  role: string;
-}
+export type StudentProfile = UserAccount;
 
-export interface TransactionRecord {
+export interface SessionHistoryItem {
   id: string;
-  timestamp: string;
-  stationId: string;
+  receiptNumber: string;
+  date: string;
   stationName: string;
-  compartmentNumber: number;
+  slotNumber: number;
   durationMinutes: number;
-  amount: number;
-  paymentMethod: PaymentMethod;
-  status: 'completed' | 'active' | 'extended';
-  receiptRef: string;
-  description?: string;
+  totalFee: number;
+  serviceType: ServiceType;
+  compartmentSize: LockerSize;
+  status: 'Completed' | 'Refunded';
 }
 
-export interface TamperAlertEvent {
+export interface SecurityAlert {
   id: string;
   timestamp: string;
-  stationId: string;
+  stationCode: string;
   stationName: string;
-  compartmentId: string;
-  compartmentNumber: number;
+  slotNumber: number;
   severity: 'critical' | 'warning' | 'info';
-  type: 'forced_door' | 'overheat' | 'overstay' | 'coin_jam' | 'voltage_surge';
+  type: 'Tamper Vibration' | 'Thermal Threshold' | 'Maintenance' | 'Overcharge Cut-Off';
   message: string;
-  isResolved: boolean;
-  resolvedAt?: string;
-  resolvedBy?: string;
+  resolved: boolean;
 }

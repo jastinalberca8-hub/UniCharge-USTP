@@ -8,9 +8,17 @@ declare global {
 
 export const createPool = () => {
   if (!global._postgresPool) {
+    const sqlHost = process.env.SQL_HOST || '';
+    const isUnixSocket = sqlHost.startsWith('/');
+    const isLocalHost = sqlHost === 'localhost' || sqlHost === '127.0.0.1';
+    const useSsl =
+      !isUnixSocket &&
+      (process.env.SQL_SSL === 'true' || (!isLocalHost && process.env.SQL_SSL !== 'false'));
+
     global._postgresPool = new Pool({
-      host: process.env.SQL_HOST,
-      port: Number(process.env.SQL_PORT) || 5432,
+      host: sqlHost,
+      ...(isUnixSocket ? {} : { port: Number(process.env.SQL_PORT) || 5432 }),
+      ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
       user: process.env.SQL_USER,
       password: process.env.SQL_PASSWORD,
       database: process.env.SQL_DB_NAME,

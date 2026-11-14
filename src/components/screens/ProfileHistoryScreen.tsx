@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { useUniCharge } from '../../context/UniChargeContext';
 import { sound } from '../../utils/audio';
+import { formatDuration } from '../../utils/format';
 import { UserAvatar } from '../brand/UserAvatar';
 import {
   Wallet,
@@ -206,7 +207,7 @@ export const ProfileHistoryScreen: React.FC = () => {
                   <div>
                     <h4 className="text-xs font-bold text-[#1E293B]">{item.stationName}</h4>
                     <div className="text-[10px] text-[#64748B] font-mono mt-0.5">
-                      Slot #{item.slotNumber} · {item.durationMinutes}m · {item.date}
+                      Slot #{item.slotNumber} · {formatDuration(item.durationMinutes)} · {item.date}
                     </div>
                   </div>
                 </div>

@@ -1,5 +1,7 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import confetti from 'canvas-confetti';
+import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
+import { auth, googleAuthProvider } from '../lib/firebase';
 import {
   KioskStation,
   UserAccount,
@@ -43,6 +45,8 @@ interface UniChargeContextType {
   currentRoute: AppRoute;
   accessDeniedMessage: string | null;
   clearAccessDenied: () => void;
+  authSuccessMessage: string | null;
+  clearAuthSuccess: () => void;
   navigate: (route: AppRoute) => void;
   stations: KioskStation[];
   selectedStation: KioskStation;
@@ -60,6 +64,7 @@ interface UniChargeContextType {
   activeKioskSlotReleased: number | null;
   // Auth Methods
   loginWithAccount: (identifier: string, password: string) => AuthResult;
+  loginWithGoogle: () => Promise<AuthResult>;
   loginDemoByEmail: (email: string) => AuthResult;
   registerStudentAccount: (params: {
     name: string;
@@ -119,21 +124,75 @@ interface UniChargeContextType {
 
 const UniChargeContext = createContext<UniChargeContextType | undefined>(undefined);
 
-function normalizePath(pathname: string): AppRoute {
-  if (pathname === '/signup') return '/signup';
-  if (pathname === '/student/dashboard') return '/student/dashboard';
-  if (pathname === '/mobile-expo') return '/mobile-expo';
-  if (pathname === '/admin/dashboard') return '/admin/dashboard';
+const STORAGE_KEYS = {
+  users: 'unicharge_users_v2',
+  currentUserId: 'unicharge_current_user_id_v2',
+  sessions: 'unicharge_sessions_by_user_v2',
+  history: 'unicharge_history_by_user_v2',
+};
+
+function readStorage<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStorage<T>(key: string, value: T): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function normalizePath(rawPath: string): AppRoute {
+  const cleaned = rawPath.replace(/^#/, '');
+  if (cleaned === '/signup') return '/signup';
+  if (cleaned === '/student/dashboard') return '/student/dashboard';
+  if (cleaned === '/mobile-expo') return '/mobile-expo';
+  if (cleaned === '/admin/dashboard') return '/admin/dashboard';
   return '/login';
 }
 
+function getCurrentBrowserRoute(): AppRoute {
+  if (typeof window === 'undefined') return '/login';
+  if (window.location.hash && window.location.hash.length > 1) {
+    return normalizePath(window.location.hash);
+  }
+  return normalizePath(window.location.pathname);
+}
+
+function syncBrowserUrl(route: AppRoute, replace = false): void {
+  if (typeof window === 'undefined') return;
+  const targetUrl = `/#${route}`;
+  const currentFull = `${window.location.pathname}${window.location.hash}`;
+  if (currentFull === targetUrl) return;
+  if (replace) {
+    window.history.replaceState({}, '', targetUrl);
+  } else {
+    window.history.pushState({}, '', targetUrl);
+  }
+}
+
 export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [users, setUsers] = useState<UserAccount[]>(SEEDED_USERS);
-  const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
-  const [currentRoute, setCurrentRoute] = useState<AppRoute>(() =>
-    typeof window !== 'undefined' ? normalizePath(window.location.pathname) : '/login'
+  const [users, setUsers] = useState<UserAccount[]>(() =>
+    readStorage<UserAccount[]>(STORAGE_KEYS.users, SEEDED_USERS)
   );
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => {
+    const savedId = readStorage<string | null>(STORAGE_KEYS.currentUserId, null);
+    if (!savedId) return null;
+    const savedUsers = readStorage<UserAccount[]>(STORAGE_KEYS.users, SEEDED_USERS);
+    return savedUsers.find((u) => u.id === savedId) ?? null;
+  });
+  const [currentRoute, setCurrentRoute] = useState<AppRoute>(() => getCurrentBrowserRoute());
   const [accessDeniedMessage, setAccessDeniedMessage] = useState<string | null>(null);
+  const [authSuccessMessage, setAuthSuccessMessage] = useState<string | null>(null);
 
   const [stations, setStations] = useState<KioskStation[]>(INITIAL_STATIONS);
   const [selectedStation, setSelectedStation] = useState<KioskStation>(INITIAL_STATIONS[0]);
@@ -143,14 +202,18 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [selectedDuration, setSelectedDuration] = useState<number>(60);
   const [sessionsByUserId, setSessionsByUserId] = useState<
     Record<string, ActiveSession | null>
-  >({
-    usr_ustp_202330192: INITIAL_SAMPLE_SESSION,
-  });
+  >(() =>
+    readStorage<Record<string, ActiveSession | null>>(STORAGE_KEYS.sessions, {
+      usr_ustp_202330192: INITIAL_SAMPLE_SESSION,
+    })
+  );
   const [historyByUserId, setHistoryByUserId] = useState<
     Record<string, SessionHistoryItem[]>
-  >({
-    usr_ustp_202330192: INITIAL_HISTORY,
-  });
+  >(() =>
+    readStorage<Record<string, SessionHistoryItem[]>>(STORAGE_KEYS.history, {
+      usr_ustp_202330192: INITIAL_HISTORY,
+    })
+  );
   const [pendingUnlockToken, setPendingUnlockToken] = useState<PendingUnlockToken | null>(null);
   const [pendingSecondsLeft, setPendingSecondsLeft] = useState<number>(0);
   const [securityAlerts, setSecurityAlerts] = useState<SecurityAlert[]>(INITIAL_SECURITY_ALERTS);
@@ -160,10 +223,114 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [isKioskDoorOpen, setIsKioskDoorOpen] = useState<boolean>(false);
   const [activeKioskSlotReleased, setActiveKioskSlotReleased] = useState<number | null>(null);
 
+  // Firebase ID token held strictly in memory (never localStorage)
+  const idTokenRef = useRef<string | null>(null);
+  const isFirebaseSessionRef = useRef<boolean>(false);
+
+  const authorizedFetch = useCallback(async (url: string, init: RequestInit = {}) => {
+    const fbUser = auth.currentUser;
+    if (!fbUser && !idTokenRef.current) return null;
+    const token = fbUser ? await fbUser.getIdToken() : idTokenRef.current;
+    if (!token) return null;
+    idTokenRef.current = token;
+    const res = await fetch(url, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init.headers || {}),
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `Request failed (${res.status})`);
+    }
+    return res.json();
+  }, []);
+
+  const hydrateFromBackend = useCallback(async (token: string): Promise<UserAccount> => {
+    idTokenRef.current = token;
+    isFirebaseSessionRef.current = true;
+    const res = await fetch('/api/bootstrap', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || 'Failed to load account from server');
+    }
+    const data = await res.json();
+    const loadedUser = data.user as UserAccount;
+    setCurrentUser(loadedUser);
+    if (Array.isArray(data.users) && data.users.length > 0) {
+      setUsers((prev) => {
+        const merged = [...prev];
+        for (const u of data.users as UserAccount[]) {
+          const idx = merged.findIndex((m) => m.id === u.id || m.email === u.email);
+          if (idx >= 0) merged[idx] = { ...merged[idx], ...u };
+          else merged.push(u);
+        }
+        return merged;
+      });
+    }
+    if (Array.isArray(data.stations) && data.stations.length > 0) {
+      setStations(data.stations);
+      setSelectedStation((prev) => data.stations.find((s: KioskStation) => s.id === prev.id) || data.stations[0]);
+    }
+    if (Array.isArray(data.securityAlerts)) {
+      setSecurityAlerts(data.securityAlerts);
+    }
+    setSessionsByUserId((prev) => ({
+      ...prev,
+      [loadedUser.id]: data.activeSession ?? null,
+    }));
+    setHistoryByUserId((prev) => ({
+      ...prev,
+      [loadedUser.id]: Array.isArray(data.sessionHistory) ? data.sessionHistory : [],
+    }));
+    return loadedUser;
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      if (fbUser) {
+        try {
+          const token = await fbUser.getIdToken();
+          await hydrateFromBackend(token);
+        } catch (err) {
+          console.error('Failed to restore authenticated session:', err);
+        }
+      } else {
+        idTokenRef.current = null;
+        isFirebaseSessionRef.current = false;
+      }
+    });
+    return () => unsubscribe();
+  }, [hydrateFromBackend]);
+
+  useEffect(() => {
+    writeStorage(STORAGE_KEYS.users, users);
+  }, [users]);
+
+  useEffect(() => {
+    writeStorage(STORAGE_KEYS.currentUserId, currentUser ? currentUser.id : null);
+  }, [currentUser]);
+
+  useEffect(() => {
+    writeStorage(STORAGE_KEYS.sessions, sessionsByUserId);
+  }, [sessionsByUserId]);
+
+  useEffect(() => {
+    writeStorage(STORAGE_KEYS.history, historyByUserId);
+  }, [historyByUserId]);
+
   const isAuthenticated = Boolean(currentUser);
   const student = currentUser ?? INITIAL_STUDENT;
   const activeSession = currentUser ? (sessionsByUserId[currentUser.id] ?? null) : null;
   const sessionHistory = currentUser ? (historyByUserId[currentUser.id] ?? []) : [];
+
+  const clearAuthSuccess = useCallback(() => setAuthSuccessMessage(null), []);
 
   const setActiveSessionForCurrentUser = (
     updater: ActiveSession | null | ((prev: ActiveSession | null) => ActiveSession | null)
@@ -215,9 +382,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     (route: AppRoute) => {
       const guarded = enforceRouteGuard(route, currentUser);
       setCurrentRoute(guarded);
-      if (typeof window !== 'undefined' && window.location.pathname !== guarded) {
-        window.history.pushState({}, '', guarded);
-      }
+      syncBrowserUrl(guarded, false);
     },
     [currentUser, enforceRouteGuard]
   );
@@ -227,22 +392,22 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     if (guarded !== currentRoute) {
       setCurrentRoute(guarded);
     }
-    if (typeof window !== 'undefined' && window.location.pathname !== guarded) {
-      window.history.replaceState({}, '', guarded);
-    }
+    syncBrowserUrl(guarded, true);
   }, [currentRoute, currentUser, enforceRouteGuard]);
 
   useEffect(() => {
-    const handlePopState = () => {
-      const requested = normalizePath(window.location.pathname);
+    const handleLocationChange = () => {
+      const requested = getCurrentBrowserRoute();
       const guarded = enforceRouteGuard(requested, currentUser);
       setCurrentRoute(guarded);
-      if (window.location.pathname !== guarded) {
-        window.history.replaceState({}, '', guarded);
-      }
+      syncBrowserUrl(guarded, true);
     };
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
+    window.addEventListener('popstate', handleLocationChange);
+    window.addEventListener('hashchange', handleLocationChange);
+    return () => {
+      window.removeEventListener('popstate', handleLocationChange);
+      window.removeEventListener('hashchange', handleLocationChange);
+    };
   }, [currentUser, enforceRouteGuard]);
 
   // 60-second Countdown Timer for Pending QR Unlock Token
@@ -334,14 +499,33 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
 
     setAccessDeniedMessage(null);
+    setAuthSuccessMessage(null);
     setCurrentUser(matched);
     const destination: AppRoute =
       matched.role === 'admin' ? '/admin/dashboard' : '/student/dashboard';
     setCurrentRoute(destination);
-    if (typeof window !== 'undefined') {
-      window.history.pushState({}, '', destination);
-    }
+    syncBrowserUrl(destination, false);
     return { success: true, user: matched };
+  };
+
+  const loginWithGoogle = async (): Promise<AuthResult> => {
+    sound.playTap();
+    try {
+      const credential = await signInWithPopup(auth, googleAuthProvider);
+      const token = await credential.user.getIdToken();
+      const loadedUser = await hydrateFromBackend(token);
+      setAccessDeniedMessage(null);
+      setAuthSuccessMessage(null);
+      const destination: AppRoute =
+        loadedUser.role === 'admin' ? '/admin/dashboard' : '/student/dashboard';
+      setCurrentRoute(destination);
+      syncBrowserUrl(destination, false);
+      return { success: true, user: loadedUser };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Google Sign-In failed. Please try again.';
+      return { success: false, error: message };
+    }
   };
 
   const loginDemoByEmail = (email: string): AuthResult => {
@@ -407,11 +591,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setSessionsByUserId((prev) => ({ ...prev, [newStudent.id]: null }));
     setHistoryByUserId((prev) => ({ ...prev, [newStudent.id]: [] }));
     setAccessDeniedMessage(null);
-    setCurrentUser(newStudent);
-    setCurrentRoute('/student/dashboard');
-    if (typeof window !== 'undefined') {
-      window.history.pushState({}, '', '/student/dashboard');
-    }
+    setCurrentUser(null);
+    setAuthSuccessMessage(
+      `Account created for ${newStudent.name} (${newStudent.studentIdNumber}). Please sign in with your credentials.`
+    );
+    setCurrentRoute('/login');
+    syncBrowserUrl('/login', false);
     return { success: true, user: newStudent };
   };
 
@@ -435,12 +620,14 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const logout = () => {
     sound.playTap();
     setAccessDeniedMessage(null);
+    setAuthSuccessMessage(null);
     setPendingUnlockToken(null);
+    idTokenRef.current = null;
+    isFirebaseSessionRef.current = false;
+    signOut(auth).catch(() => {});
     setCurrentUser(null);
     setCurrentRoute('/login');
-    if (typeof window !== 'undefined') {
-      window.history.pushState({}, '', '/login');
-    }
+    syncBrowserUrl('/login', false);
   };
 
   const updateCurrentUserState = (updater: (user: UserAccount) => UserAccount) => {
@@ -627,6 +814,17 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setActiveSessionForCurrentUser(newSession);
     setPendingUnlockToken(null);
 
+    if (isFirebaseSessionRef.current) {
+      authorizedFetch('/api/sessions/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          session: newSession,
+          deductWalletAmount:
+            pendingUnlockToken.paymentMethod === 'wallet' ? pendingUnlockToken.totalFee : 0,
+        }),
+      }).catch((err) => console.error('Session sync failed:', err));
+    }
+
     confetti({
       particleCount: 55,
       spread: 60,
@@ -714,6 +912,16 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     setActiveSessionForCurrentUser(newSession);
 
+    if (isFirebaseSessionRef.current) {
+      authorizedFetch('/api/sessions/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          session: newSession,
+          deductWalletAmount: paymentMethod === 'wallet' ? fee : 0,
+        }),
+      }).catch((err) => console.error('QR session sync failed:', err));
+    }
+
     confetti({
       particleCount: 50,
       spread: 60,
@@ -772,6 +980,19 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
     setActiveSessionForCurrentUser(null);
 
+    if (isFirebaseSessionRef.current) {
+      authorizedFetch('/api/sessions/end', {
+        method: 'POST',
+        body: JSON.stringify({
+          sessionId: activeSession.sessionId,
+          stationId: activeSession.stationId,
+          slotNumber: activeSession.slotNumber,
+          receiptNumber: historyEntry.receiptNumber,
+          dateLabel: historyEntry.date,
+        }),
+      }).catch((err) => console.error('End session sync failed:', err));
+    }
+
     confetti({
       particleCount: 75,
       spread: 70,
@@ -806,6 +1027,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const topUpWallet = (amount: number) => {
     sound.playTap();
     updateCurrentUserState((u) => ({ ...u, walletBalance: u.walletBalance + amount }));
+    if (isFirebaseSessionRef.current) {
+      authorizedFetch('/api/wallet/topup', {
+        method: 'POST',
+        body: JSON.stringify({ amount }),
+      }).catch((err) => console.error('Wallet top-up sync failed:', err));
+    }
     confetti({
       particleCount: 30,
       spread: 50,
@@ -816,17 +1043,38 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const toggleBiometrics = () => {
     sound.playTap();
-    updateCurrentUserState((u) => ({ ...u, biometricEnabled: !u.biometricEnabled }));
+    const next = !student.biometricEnabled;
+    updateCurrentUserState((u) => ({ ...u, biometricEnabled: next }));
+    if (isFirebaseSessionRef.current) {
+      authorizedFetch('/api/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({ biometricEnabled: next }),
+      }).catch((err) => console.error('Biometrics sync failed:', err));
+    }
   };
 
   const togglePushNotifications = () => {
     sound.playTap();
-    updateCurrentUserState((u) => ({ ...u, pushNotifications: !u.pushNotifications }));
+    const next = !student.pushNotifications;
+    updateCurrentUserState((u) => ({ ...u, pushNotifications: next }));
+    if (isFirebaseSessionRef.current) {
+      authorizedFetch('/api/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({ pushNotifications: next }),
+      }).catch((err) => console.error('Notifications sync failed:', err));
+    }
   };
 
   const toggleOverchargeProtection = () => {
     sound.playTap();
-    updateCurrentUserState((u) => ({ ...u, overchargeAlerts: !u.overchargeAlerts }));
+    const next = !student.overchargeAlerts;
+    updateCurrentUserState((u) => ({ ...u, overchargeAlerts: next }));
+    if (isFirebaseSessionRef.current) {
+      authorizedFetch('/api/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({ overchargeAlerts: next }),
+      }).catch((err) => console.error('Overcharge alert sync failed:', err));
+    }
     if (activeSession) {
       setActiveSessionForCurrentUser((prev) =>
         prev
@@ -849,6 +1097,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       ...(updates.degree !== undefined ? { degree: updates.degree } : {}),
       ...(updates.avatar !== undefined ? { avatar: updates.avatar } : {}),
     }));
+    if (isFirebaseSessionRef.current) {
+      authorizedFetch('/api/profile', {
+        method: 'PATCH',
+        body: JSON.stringify(updates),
+      }).catch((err) => console.error('Profile sync failed:', err));
+    }
   };
 
   const triggerSimulatedTamper = () => {
@@ -902,18 +1156,33 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         };
       })
     );
+
+    if (isFirebaseSessionRef.current) {
+      authorizedFetch('/api/admin/slots/update', {
+        method: 'POST',
+        body: JSON.stringify({
+          stationId,
+          slotNumber,
+          status: 'available',
+          isDoorOpen: true,
+          isLocked: false,
+        }),
+      }).catch((err) => console.error('Admin unlock sync failed:', err));
+    }
   };
 
   const adminToggleSlotMaintenance = (stationId: string, slotNumber: number) => {
     if (currentUser?.role !== 'admin') return;
     sound.playTap();
+    let computedStatus: LockerSlot['status'] = 'available';
     setStations((prev) =>
       prev.map((st) => {
         if (st.id !== stationId) return st;
         const updatedSlots = st.slots.map((s) => {
           if (s.slotNumber !== slotNumber) return s;
           const nextStatus = s.status === 'maintenance' ? 'available' : 'maintenance';
-          return { ...s, status: nextStatus as LockerSlot['status'] };
+          computedStatus = nextStatus as LockerSlot['status'];
+          return { ...s, status: computedStatus };
         });
         return {
           ...st,
@@ -922,6 +1191,17 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         };
       })
     );
+
+    if (isFirebaseSessionRef.current) {
+      authorizedFetch('/api/admin/slots/update', {
+        method: 'POST',
+        body: JSON.stringify({
+          stationId,
+          slotNumber,
+          status: computedStatus,
+        }),
+      }).catch((err) => console.error('Admin maintenance sync failed:', err));
+    }
   };
 
   const adminProvisionStaff = ({
@@ -980,6 +1260,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setSecurityAlerts((prev) =>
       prev.map((a) => (a.id === alertId ? { ...a, resolved: true } : a))
     );
+    if (isFirebaseSessionRef.current) {
+      authorizedFetch('/api/admin/alerts/resolve', {
+        method: 'POST',
+        body: JSON.stringify({ alertId }),
+      }).catch((err) => console.error('Admin alert sync failed:', err));
+    }
   };
 
   return (
@@ -992,6 +1278,8 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         currentRoute,
         accessDeniedMessage,
         clearAccessDenied,
+        authSuccessMessage,
+        clearAuthSuccess,
         navigate,
         stations,
         selectedStation,
@@ -1008,6 +1296,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         isKioskDoorOpen,
         activeKioskSlotReleased,
         loginWithAccount,
+        loginWithGoogle,
         loginDemoByEmail,
         registerStudentAccount,
         loginDemo,

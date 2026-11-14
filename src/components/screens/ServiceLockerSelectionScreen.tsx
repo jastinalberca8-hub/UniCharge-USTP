@@ -1,6 +1,7 @@
 import React from 'react';
 import { useUniCharge } from '../../context/UniChargeContext';
 import { sound } from '../../utils/audio';
+import { formatDuration } from '../../utils/format';
 import { ServiceType, LockerSize, LockerSlot } from '../../types';
 import { PRICING_RATES } from '../../data/mockData';
 import {
@@ -257,9 +258,7 @@ export const ServiceLockerSelectionScreen: React.FC<ServiceLockerSelectionScreen
               4. Duration
             </label>
             <span className="text-xs font-bold text-[#4E6E81] font-mono">
-              {selectedDuration >= 60
-                ? `${selectedDuration / 60} Hour${selectedDuration > 60 ? 's' : ''}`
-                : `${selectedDuration} Mins`}
+              {formatDuration(selectedDuration)}
             </span>
           </div>
 
@@ -311,6 +310,12 @@ export const ServiceLockerSelectionScreen: React.FC<ServiceLockerSelectionScreen
             <span className="text-[#64748B]">Service &amp; Size:</span>
             <span className="font-semibold text-[#1E293B] capitalize">
               {selectedService} · Size {selectedSize}
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-[#64748B]">Duration:</span>
+            <span className="font-semibold text-[#1E293B] font-mono">
+              {formatDuration(selectedDuration)}
             </span>
           </div>
           <div className="pt-2 border-t border-[#E2E8F0] flex items-center justify-between">

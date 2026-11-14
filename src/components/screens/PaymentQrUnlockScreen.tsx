@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useUniCharge } from '../../context/UniChargeContext';
 import { sound } from '../../utils/audio';
+import { formatDuration } from '../../utils/format';
 import { PRICING_RATES } from '../../data/mockData';
 import { QrMatrixSvg } from '../hardware/QrMatrixSvg';
 import {
@@ -272,7 +273,7 @@ export const PaymentQrUnlockScreen: React.FC<PaymentQrUnlockScreenProps> = ({
               <div className="flex items-center justify-between text-xs">
                 <span className="text-[#64748B]">Duration / Total:</span>
                 <span className="font-bold text-sm text-[#4E6E81] font-mono">
-                  {selectedDuration}m · ₱{totalFee}.00
+                  {formatDuration(selectedDuration)} · ₱{totalFee}.00
                 </span>
               </div>
 

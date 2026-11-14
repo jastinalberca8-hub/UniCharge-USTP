@@ -1,6 +1,6 @@
 {
-  "name": "UniCharge USTP - Smart Campus Charging & Storage",
-  "description": "Smart campus charging locker and temporary storage platform for University of Science and Technology of Southern Philippines (USTP).",
+  "name": "UniCharge USTP Smart Locker",
+  "description": "Smart Campus Charging & Storage Locker System for University of Science and Technology of Southern Philippines with IoT hardware simulation, QR unlock, and mobile Expo architecture.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

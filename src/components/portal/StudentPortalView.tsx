@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useUniCharge } from '../../context/UniChargeContext';
 import { sound } from '../../utils/audio';
+import { formatDuration } from '../../utils/format';
 import { PRICING_RATES } from '../../data/mockData';
 import { KioskStation, LockerSize, ServiceType, SessionHistoryItem } from '../../types';
 import {
@@ -745,7 +746,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
             <div>
               <div className="flex items-center justify-between mb-2">
                 <label className="text-xs font-bold text-[#1E293B] uppercase tracking-wider">4. Duration</label>
-                <span className="text-xs font-mono font-bold text-[#4E6E81]">{selectedDuration} mins</span>
+                <span className="text-xs font-mono font-bold text-[#4E6E81]">{formatDuration(selectedDuration)}</span>
               </div>
               <input
                 type="range"
@@ -771,6 +772,12 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                 <span className="text-[#64748B]">Compartment</span>
                 <span className="font-mono font-semibold text-[#1E293B]">
                   Slot #{selectedSlot?.slotNumber || 1} ({selectedSize})
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#64748B]">Duration</span>
+                <span className="font-mono font-semibold text-[#1E293B]">
+                  {formatDuration(selectedDuration)}
                 </span>
               </div>
               <div className="flex justify-between">
@@ -953,7 +960,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                       <td className="py-3 px-6 font-mono font-semibold text-[#4E6E81]">{item.receiptNumber}</td>
                       <td className="py-3 px-4 text-[#1E293B]">{item.stationName}</td>
                       <td className="py-3 px-4 font-mono">#{item.slotNumber} ({item.compartmentSize})</td>
-                      <td className="py-3 px-4 font-mono">{item.durationMinutes} min</td>
+                      <td className="py-3 px-4 font-mono">{formatDuration(item.durationMinutes)}</td>
                       <td className="py-3 px-4 text-[#64748B]">{item.date}</td>
                       <td className="py-3 px-6 text-right font-mono font-bold text-[#4E6E81]">₱{item.totalFee}.00</td>
                     </tr>
@@ -983,7 +990,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               <div className="space-y-2 text-xs">
                 <div className="flex justify-between"><span className="text-[#64748B]">Station</span><span className="font-semibold text-[#1E293B]">{selectedReceipt.stationName}</span></div>
                 <div className="flex justify-between"><span className="text-[#64748B]">Slot</span><span className="font-mono text-[#1E293B]">#{selectedReceipt.slotNumber}</span></div>
-                <div className="flex justify-between"><span className="text-[#64748B]">Duration</span><span className="font-mono text-[#1E293B]">{selectedReceipt.durationMinutes} mins</span></div>
+                <div className="flex justify-between"><span className="text-[#64748B]">Duration</span><span className="font-mono text-[#1E293B]">{formatDuration(selectedReceipt.durationMinutes)}</span></div>
                 <div className="flex justify-between"><span className="text-[#64748B]">Amount Paid</span><span className="font-mono font-bold text-[#4E6E81]">₱{selectedReceipt.totalFee}.00</span></div>
               </div>
               <button

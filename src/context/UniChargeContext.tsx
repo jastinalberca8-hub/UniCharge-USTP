@@ -12,6 +12,7 @@ import {
   LockerSlot,
   SecurityAlert,
   PendingUnlockToken,
+  DashboardNotification,
 } from '../types';
 import {
   SEEDED_USERS,
@@ -23,18 +24,34 @@ import {
   PRICING_RATES,
 } from '../data/mockData';
 import { sound } from '../utils/audio';
+import {
+  createFirestoreNotification,
+  deleteFirestoreNotification,
+  markFirestoreNotificationRead,
+  subscribeUserNotifications,
+  type CreateNotificationInput,
+} from '../lib/firestoreNotifications';
 
 export type AppRoute =
   | '/login'
   | '/signup'
+  | '/onboarding'
   | '/student/dashboard'
-  | '/mobile-expo'
+  | '/kiosk'
   | '/admin/dashboard';
 
 interface AuthResult {
   success: boolean;
   error?: string;
   user?: UserAccount;
+}
+
+interface VerificationSendResult {
+  success: boolean;
+  error?: string;
+  email?: string;
+  deliveryMode?: string;
+  previewUrl?: string;
 }
 
 interface UniChargeContextType {
@@ -63,16 +80,43 @@ interface UniChargeContextType {
   isKioskDoorOpen: boolean;
   activeKioskSlotReleased: number | null;
   // Auth Methods
-  loginWithAccount: (identifier: string, password: string) => AuthResult;
+  loginWithAccount: (identifier: string, password: string) => Promise<AuthResult>;
   loginWithGoogle: () => Promise<AuthResult>;
-  loginDemoByEmail: (email: string) => AuthResult;
+  completeGoogleOnboarding: (params: {
+    name?: string;
+    studentIdNumber: string;
+    college: string;
+    course: string;
+  }) => Promise<AuthResult>;
+  loginDemoByEmail: (email: string) => Promise<AuthResult>;
+  sendSignupVerificationCode: (params: {
+    name: string;
+    studentIdNumber: string;
+    email: string;
+    password: string;
+    college: string;
+    course: string;
+  }) => Promise<VerificationSendResult>;
   registerStudentAccount: (params: {
     name: string;
     studentIdNumber: string;
     email: string;
     password: string;
-    college?: string;
-  }) => AuthResult;
+    college: string;
+    course: string;
+    verificationCode: string;
+  }) => Promise<AuthResult>;
+  sendPasswordResetCode: (identifier: string) => Promise<{
+    success: boolean;
+    error?: string;
+    maskedEmail?: string;
+    previewUrl?: string;
+  }>;
+  resetPasswordWithCode: (params: {
+    identifier: string;
+    verificationCode: string;
+    newPassword: string;
+  }) => Promise<{ success: boolean; error?: string; message?: string }>;
   loginDemo: () => void;
   loginWithCredentials: (studentId: string, email: string) => boolean;
   logout: () => void;
@@ -85,13 +129,25 @@ interface UniChargeContextType {
   calculateFee: (size: LockerSize, durationMinutes: number, service: ServiceType) => number;
   generateUnlockToken: (
     paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash'
-  ) => { success: boolean; message: string; token?: PendingUnlockToken };
-  regenerateUnlockToken: () => void;
+  ) => Promise<{ success: boolean; message: string; token?: PendingUnlockToken }>;
+  regenerateUnlockToken: () => Promise<{
+    success: boolean;
+    message: string;
+    token?: PendingUnlockToken;
+  }>;
+  resendUnlockQrEmail: () => Promise<{
+    success: boolean;
+    message: string;
+    emailSentTo?: string;
+    emailSentFrom?: string;
+    deliveryMode?: 'smtp' | 'resend' | 'ethereal';
+    previewUrl?: string;
+  }>;
   cancelPendingUnlock: () => void;
   verifyKioskUnlock: (
     pinOrQrPayload: string,
     kioskStationId?: string
-  ) => { success: boolean; message: string };
+  ) => Promise<{ success: boolean; message: string }>;
   unlockStationViaQr: (
     qrCode: string,
     paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash'
@@ -109,7 +165,19 @@ interface UniChargeContextType {
   }) => void;
   closeKioskDoor: (slotNumber: number) => void;
   triggerSimulatedTamper: () => void;
+  simulateFullCharge: () => Promise<void>;
+  triggerUnexpectedDoorOpen: (stationId?: string, slotNumber?: number) => Promise<void>;
   setHardwareKioskStationId: (stationId: string) => void;
+  // Real-Time Firestore Notifications
+  notifications: DashboardNotification[];
+  liveToastNotifications: DashboardNotification[];
+  unreadNotificationCount: number;
+  isFirestoreLive: boolean;
+  firestoreError: string | null;
+  dismissLiveToast: (id: string) => void;
+  markNotificationRead: (id: string) => Promise<void>;
+  markAllNotificationsRead: () => Promise<void>;
+  deleteNotification: (id: string) => Promise<void>;
   // Admin Methods
   adminRemoteUnlockSlot: (stationId: string, slotNumber: number) => void;
   adminToggleSlotMaintenance: (stationId: string, slotNumber: number) => void;
@@ -118,7 +186,7 @@ interface UniChargeContextType {
     email: string;
     staffId: string;
     password: string;
-  }) => AuthResult;
+  }) => Promise<AuthResult>;
   resolveSecurityAlert: (alertId: string) => void;
 }
 
@@ -154,8 +222,9 @@ function writeStorage<T>(key: string, value: T): void {
 function normalizePath(rawPath: string): AppRoute {
   const cleaned = rawPath.replace(/^#/, '');
   if (cleaned === '/signup') return '/signup';
+  if (cleaned === '/onboarding') return '/onboarding';
   if (cleaned === '/student/dashboard') return '/student/dashboard';
-  if (cleaned === '/mobile-expo') return '/mobile-expo';
+  if (cleaned === '/kiosk' || cleaned === '/mobile-expo') return '/kiosk';
   if (cleaned === '/admin/dashboard') return '/admin/dashboard';
   return '/login';
 }
@@ -223,14 +292,30 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [isKioskDoorOpen, setIsKioskDoorOpen] = useState<boolean>(false);
   const [activeKioskSlotReleased, setActiveKioskSlotReleased] = useState<number | null>(null);
 
-  // Firebase ID token held strictly in memory (never localStorage)
+  // Real-Time Firestore Notifications State
+  const [firebaseAuthUser, setFirebaseAuthUser] = useState<{
+    uid: string;
+    emailVerified: boolean;
+  } | null>(() =>
+    auth.currentUser
+      ? { uid: auth.currentUser.uid, emailVerified: auth.currentUser.emailVerified }
+      : null
+  );
+  const [notifications, setNotifications] = useState<DashboardNotification[]>([]);
+  const [liveToastNotifications, setLiveToastNotifications] = useState<DashboardNotification[]>([]);
+  const [firestoreError, setFirestoreError] = useState<string | null>(null);
+  const notifiedChargeSessionsRef = useRef<Set<string>>(new Set());
+
+  // Auth token held strictly in memory (never localStorage)
   const idTokenRef = useRef<string | null>(null);
-  const isFirebaseSessionRef = useRef<boolean>(false);
+  const isBackendSessionRef = useRef<boolean>(false);
 
   const authorizedFetch = useCallback(async (url: string, init: RequestInit = {}) => {
     const fbUser = auth.currentUser;
-    if (!fbUser && !idTokenRef.current) return null;
-    const token = fbUser ? await fbUser.getIdToken() : idTokenRef.current;
+    let token = idTokenRef.current;
+    if (!token?.startsWith('uc_') && fbUser) {
+      token = await fbUser.getIdToken();
+    }
     if (!token) return null;
     idTokenRef.current = token;
     const res = await fetch(url, {
@@ -248,53 +333,79 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     return res.json();
   }, []);
 
-  const hydrateFromBackend = useCallback(async (token: string): Promise<UserAccount> => {
-    idTokenRef.current = token;
-    isFirebaseSessionRef.current = true;
-    const res = await fetch('/api/bootstrap', {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-    if (!res.ok) {
-      const errBody = await res.json().catch(() => ({}));
-      throw new Error(errBody.error || 'Failed to load account from server');
-    }
-    const data = await res.json();
-    const loadedUser = data.user as UserAccount;
-    setCurrentUser(loadedUser);
-    if (Array.isArray(data.users) && data.users.length > 0) {
-      setUsers((prev) => {
-        const merged = [...prev];
-        for (const u of data.users as UserAccount[]) {
-          const idx = merged.findIndex((m) => m.id === u.id || m.email === u.email);
-          if (idx >= 0) merged[idx] = { ...merged[idx], ...u };
-          else merged.push(u);
-        }
-        return merged;
+  const applyBootstrapPayload = useCallback(
+    (data: {
+      user: UserAccount;
+      users?: UserAccount[];
+      stations?: KioskStation[];
+      securityAlerts?: SecurityAlert[];
+      activeSession?: ActiveSession | null;
+      sessionHistory?: SessionHistoryItem[];
+      pendingUnlockToken?: PendingUnlockToken | null;
+    }): UserAccount => {
+      const loadedUser = data.user;
+      setCurrentUser(loadedUser);
+      if (Array.isArray(data.users) && data.users.length > 0) {
+        setUsers((prev) => {
+          const merged = [...prev];
+          for (const u of data.users as UserAccount[]) {
+            const idx = merged.findIndex((m) => m.id === u.id || m.email === u.email);
+            if (idx >= 0) merged[idx] = { ...merged[idx], ...u };
+            else merged.push(u);
+          }
+          return merged;
+        });
+      }
+      if (Array.isArray(data.stations) && data.stations.length > 0) {
+        const nextStations = data.stations;
+        setStations(nextStations);
+        setSelectedStation(
+          (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
+        );
+      }
+      if (Array.isArray(data.securityAlerts)) {
+        setSecurityAlerts(data.securityAlerts);
+      }
+      setSessionsByUserId((prev) => ({
+        ...prev,
+        [loadedUser.id]: data.activeSession ?? null,
+      }));
+      setHistoryByUserId((prev) => ({
+        ...prev,
+        [loadedUser.id]: Array.isArray(data.sessionHistory) ? data.sessionHistory : [],
+      }));
+      if (data.pendingUnlockToken !== undefined) {
+        setPendingUnlockToken(data.pendingUnlockToken);
+      }
+      return loadedUser;
+    },
+    []
+  );
+
+  const hydrateFromBackend = useCallback(
+    async (token: string): Promise<UserAccount> => {
+      idTokenRef.current = token;
+      isBackendSessionRef.current = true;
+      const res = await fetch('/api/bootstrap', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       });
-    }
-    if (Array.isArray(data.stations) && data.stations.length > 0) {
-      setStations(data.stations);
-      setSelectedStation((prev) => data.stations.find((s: KioskStation) => s.id === prev.id) || data.stations[0]);
-    }
-    if (Array.isArray(data.securityAlerts)) {
-      setSecurityAlerts(data.securityAlerts);
-    }
-    setSessionsByUserId((prev) => ({
-      ...prev,
-      [loadedUser.id]: data.activeSession ?? null,
-    }));
-    setHistoryByUserId((prev) => ({
-      ...prev,
-      [loadedUser.id]: Array.isArray(data.sessionHistory) ? data.sessionHistory : [],
-    }));
-    return loadedUser;
-  }, []);
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || 'Failed to load account from server');
+      }
+      const data = await res.json();
+      return applyBootstrapPayload(data);
+    },
+    [applyBootstrapPayload]
+  );
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
+        setFirebaseAuthUser({ uid: fbUser.uid, emailVerified: fbUser.emailVerified });
+        if (idTokenRef.current?.startsWith('uc_')) return;
         try {
           const token = await fbUser.getIdToken();
           await hydrateFromBackend(token);
@@ -302,8 +413,11 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           console.error('Failed to restore authenticated session:', err);
         }
       } else {
-        idTokenRef.current = null;
-        isFirebaseSessionRef.current = false;
+        setFirebaseAuthUser(null);
+        if (!idTokenRef.current?.startsWith('uc_')) {
+          idTokenRef.current = null;
+          isBackendSessionRef.current = false;
+        }
       }
     });
     return () => unsubscribe();
@@ -326,6 +440,45 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }, [historyByUserId]);
 
   const isAuthenticated = Boolean(currentUser);
+  const isFirestoreLive = Boolean(
+    isAuthenticated && firebaseAuthUser && firebaseAuthUser.emailVerified
+  );
+
+  // Real-time Firestore onSnapshot subscription (only when Firebase Auth is verified & active)
+  useEffect(() => {
+    if (!isFirestoreLive || !firebaseAuthUser) {
+      return;
+    }
+
+    setFirestoreError(null);
+    const unsubscribe = subscribeUserNotifications(firebaseAuthUser.uid, {
+      onSnapshotData: (allItems, newlyAddedUnread) => {
+        setNotifications(allItems);
+        if (newlyAddedUnread.length > 0) {
+          const latestCritical = newlyAddedUnread.some(
+            (item) => item.type === 'unexpected_door_open'
+          );
+          if (latestCritical) {
+            sound.playTamperAlarm();
+          } else {
+            sound.playChargingConnected();
+          }
+          setLiveToastNotifications((prev) => {
+            const existingIds = new Set(prev.map((n) => n.id));
+            const additions = newlyAddedUnread.filter((n) => !existingIds.has(n.id));
+            return [...additions, ...prev].slice(0, 4);
+          });
+        }
+      },
+      onError: (err) => {
+        console.error('Firestore notifications snapshot error:', err);
+        setFirestoreError(err.message);
+      },
+    });
+
+    return () => unsubscribe();
+  }, [isFirestoreLive, firebaseAuthUser]);
+
   const student = currentUser ?? INITIAL_STUDENT;
   const activeSession = currentUser ? (sessionsByUserId[currentUser.id] ?? null) : null;
   const sessionHistory = currentUser ? (historyByUserId[currentUser.id] ?? []) : [];
@@ -355,12 +508,19 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
 
       if (user.role === 'student') {
+        if (user.profileCompleted === false) {
+          return '/onboarding';
+        }
         if (targetRoute === '/admin/dashboard') {
           setAccessDeniedMessage('Access Denied: Admin privileges required');
           return '/student/dashboard';
         }
-        if (targetRoute === '/mobile-expo') return '/mobile-expo';
-        if (targetRoute === '/login' || targetRoute === '/signup') {
+        if (targetRoute === '/kiosk') return '/kiosk';
+        if (
+          targetRoute === '/login' ||
+          targetRoute === '/signup' ||
+          targetRoute === '/onboarding'
+        ) {
           return '/student/dashboard';
         }
         return '/student/dashboard';
@@ -484,28 +644,40 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     return Math.round(baseFee + addOn);
   };
 
-  // Account-level RBAC login resolution
-  const loginWithAccount = (identifier: string, password: string): AuthResult => {
+  // Account-level RBAC login resolution (backed by PostgreSQL)
+  const loginWithAccount = async (
+    identifier: string,
+    password: string
+  ): Promise<AuthResult> => {
     sound.playTap();
-    const trimmed = identifier.trim().toLowerCase();
-    const matched = users.find(
-      (u) =>
-        (u.email.toLowerCase() === trimmed || u.studentIdNumber.toLowerCase() === trimmed) &&
-        u.password === password
-    );
-
-    if (!matched) {
-      return { success: false, error: 'Invalid email/ID or password' };
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier, password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return {
+          success: false,
+          error: data.error || 'Invalid email/ID or password',
+        };
+      }
+      idTokenRef.current = data.token;
+      isBackendSessionRef.current = true;
+      const loadedUser = applyBootstrapPayload(data);
+      setAccessDeniedMessage(null);
+      setAuthSuccessMessage(null);
+      const destination: AppRoute =
+        loadedUser.role === 'admin' ? '/admin/dashboard' : '/student/dashboard';
+      setCurrentRoute(destination);
+      syncBrowserUrl(destination, false);
+      return { success: true, user: loadedUser };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to reach authentication server.';
+      return { success: false, error: message };
     }
-
-    setAccessDeniedMessage(null);
-    setAuthSuccessMessage(null);
-    setCurrentUser(matched);
-    const destination: AppRoute =
-      matched.role === 'admin' ? '/admin/dashboard' : '/student/dashboard';
-    setCurrentRoute(destination);
-    syncBrowserUrl(destination, false);
-    return { success: true, user: matched };
   };
 
   const loginWithGoogle = async (): Promise<AuthResult> => {
@@ -517,18 +689,72 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setAccessDeniedMessage(null);
       setAuthSuccessMessage(null);
       const destination: AppRoute =
-        loadedUser.role === 'admin' ? '/admin/dashboard' : '/student/dashboard';
+        loadedUser.role === 'admin'
+          ? '/admin/dashboard'
+          : loadedUser.profileCompleted === false
+          ? '/onboarding'
+          : '/student/dashboard';
       setCurrentRoute(destination);
       syncBrowserUrl(destination, false);
       return { success: true, user: loadedUser };
     } catch (error: unknown) {
+      const code = (error as { code?: string })?.code;
+      if (code === 'auth/unauthorized-domain') {
+        const host =
+          typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+        return {
+          success: false,
+          error: `Domain "${host}" is not yet authorized for Google Sign-In. Add "${host}" in Firebase Console → Authentication → Settings → Authorized domains.`,
+        };
+      }
       const message =
         error instanceof Error ? error.message : 'Google Sign-In failed. Please try again.';
       return { success: false, error: message };
     }
   };
 
-  const loginDemoByEmail = (email: string): AuthResult => {
+  const completeGoogleOnboarding = async ({
+    name,
+    studentIdNumber,
+    college,
+    course,
+  }: {
+    name?: string;
+    studentIdNumber: string;
+    college: string;
+    course: string;
+  }): Promise<AuthResult> => {
+    sound.playTap();
+    try {
+      const data = await authorizedFetch('/api/auth/complete-onboarding', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...(name !== undefined ? { name } : {}),
+          studentIdNumber,
+          college,
+          course,
+        }),
+      });
+      if (!data?.user) {
+        return { success: false, error: 'Session expired. Please sign in with Google again.' };
+      }
+      const updatedUser = data.user as UserAccount;
+      setCurrentUser(updatedUser);
+      setUsers((prev) =>
+        prev.map((u) => (u.id === updatedUser.id ? { ...u, ...updatedUser } : u))
+      );
+      setAccessDeniedMessage(null);
+      setCurrentRoute('/student/dashboard');
+      syncBrowserUrl('/student/dashboard', false);
+      return { success: true, user: updatedUser };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to save your student profile.';
+      return { success: false, error: message };
+    }
+  };
+
+  const loginDemoByEmail = async (email: string): Promise<AuthResult> => {
     const matched = users.find((u) => u.email.toLowerCase() === email.toLowerCase());
     if (!matched) {
       return { success: false, error: 'Invalid email/ID or password' };
@@ -536,72 +762,210 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     return loginWithAccount(matched.email, matched.password);
   };
 
-  const registerStudentAccount = ({
+  const sendSignupVerificationCode = async ({
     name,
     studentIdNumber,
     email,
     password,
     college,
+    course,
   }: {
     name: string;
     studentIdNumber: string;
     email: string;
     password: string;
-    college?: string;
-  }): AuthResult => {
+    college: string;
+    course: string;
+  }): Promise<VerificationSendResult> => {
+    sound.playTap();
+    try {
+      const res = await fetch('/api/auth/send-verification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name.trim(),
+          studentIdNumber: studentIdNumber.trim(),
+          email: email.trim().toLowerCase(),
+          password,
+          college,
+          course,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return {
+          success: false,
+          error: data.error || 'Unable to send verification code.',
+        };
+      }
+      return {
+        success: true,
+        email: data.email,
+        deliveryMode: data.deliveryMode,
+        previewUrl: data.previewUrl,
+      };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to reach verification service.';
+      return { success: false, error: message };
+    }
+  };
+
+  const registerStudentAccount = async ({
+    name,
+    studentIdNumber,
+    email,
+    password,
+    college,
+    course,
+    verificationCode,
+  }: {
+    name: string;
+    studentIdNumber: string;
+    email: string;
+    password: string;
+    college: string;
+    course: string;
+    verificationCode: string;
+  }): Promise<AuthResult> => {
     sound.playTap();
     const cleanEmail = email.trim().toLowerCase();
     const cleanId = studentIdNumber.trim();
 
-    if (!name.trim() || !cleanId || !cleanEmail || !password) {
-      return { success: false, error: 'Please complete all required fields.' };
+    if (
+      !name.trim() ||
+      !cleanId ||
+      !cleanEmail ||
+      !password ||
+      !college ||
+      !course ||
+      !verificationCode
+    ) {
+      return { success: false, error: 'Please complete all required fields and verification code.' };
     }
 
-    const exists = users.some(
-      (u) =>
-        u.email.toLowerCase() === cleanEmail ||
-        u.studentIdNumber.toLowerCase() === cleanId.toLowerCase()
-    );
-    if (exists) {
+    try {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name.trim(),
+          studentIdNumber: cleanId,
+          email: cleanEmail,
+          password,
+          college,
+          course,
+          verificationCode: verificationCode.trim(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return {
+          success: false,
+          error: data.error || 'Unable to create account.',
+        };
+      }
+
+      const newStudent = data.user as UserAccount;
+      setUsers((prev) => [
+        ...prev.filter((u) => u.id !== newStudent.id && u.email !== newStudent.email),
+        newStudent,
+      ]);
+      setSessionsByUserId((prev) => ({ ...prev, [newStudent.id]: null }));
+      setHistoryByUserId((prev) => ({ ...prev, [newStudent.id]: [] }));
+      setAccessDeniedMessage(null);
+      setCurrentUser(null);
+      setAuthSuccessMessage(
+        `Email verified! Account created for ${newStudent.name} (${newStudent.studentIdNumber}). Please sign in with your credentials.`
+      );
+      setCurrentRoute('/login');
+      syncBrowserUrl('/login', false);
+      return { success: true, user: newStudent };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to reach registration server.';
+      return { success: false, error: message };
+    }
+  };
+
+  const sendPasswordResetCode = async (
+    identifier: string
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    maskedEmail?: string;
+    previewUrl?: string;
+  }> => {
+    sound.playTap();
+    try {
+      const res = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: identifier.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return {
+          success: false,
+          error: data.error || 'Unable to send password reset code.',
+        };
+      }
       return {
-        success: false,
-        error: 'An account with this email or USTP ID already exists.',
+        success: true,
+        maskedEmail: data.maskedEmail,
+        previewUrl: data.previewUrl,
       };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to reach reset service.';
+      return { success: false, error: message };
     }
+  };
 
-    const newStudent: UserAccount = {
-      id: `usr_ustp_${Date.now()}`,
-      name: name.trim(),
-      studentIdNumber: cleanId,
-      email: cleanEmail,
-      password,
-      role: 'student',
-      college: college || 'College of Information Technology and Computing (CITC)',
-      degree: 'BS Information Technology',
-      avatar: '',
-      walletBalance: 0,
-      biometricEnabled: false,
-      pushNotifications: true,
-      overchargeAlerts: true,
-      preferredPayment: 'wallet',
-      createdAt: new Date().toISOString().split('T')[0],
-    };
-
-    setUsers((prev) => [...prev, newStudent]);
-    setSessionsByUserId((prev) => ({ ...prev, [newStudent.id]: null }));
-    setHistoryByUserId((prev) => ({ ...prev, [newStudent.id]: [] }));
-    setAccessDeniedMessage(null);
-    setCurrentUser(null);
-    setAuthSuccessMessage(
-      `Account created for ${newStudent.name} (${newStudent.studentIdNumber}). Please sign in with your credentials.`
-    );
-    setCurrentRoute('/login');
-    syncBrowserUrl('/login', false);
-    return { success: true, user: newStudent };
+  const resetPasswordWithCode = async ({
+    identifier,
+    verificationCode,
+    newPassword,
+  }: {
+    identifier: string;
+    verificationCode: string;
+    newPassword: string;
+  }): Promise<{ success: boolean; error?: string; message?: string }> => {
+    sound.playTap();
+    try {
+      const res = await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          identifier: identifier.trim(),
+          verificationCode: verificationCode.trim(),
+          newPassword,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return {
+          success: false,
+          error: data.error || 'Unable to reset password.',
+        };
+      }
+      setAuthSuccessMessage(
+        data.message ||
+          'Your password has been reset. You can now sign in with your new password.'
+      );
+      return {
+        success: true,
+        message: data.message,
+      };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to reach reset server.';
+      return { success: false, error: message };
+    }
   };
 
   const loginDemo = () => {
-    loginDemoByEmail('jastinalberca8@gmail.com');
+    void loginDemoByEmail('jastinalberca8@gmail.com');
   };
 
   const loginWithCredentials = (studentId: string, email: string): boolean => {
@@ -611,7 +975,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         u.studentIdNumber.toLowerCase() === studentId.trim().toLowerCase()
     );
     if (matched) {
-      loginWithAccount(matched.email, matched.password);
+      void loginWithAccount(matched.email, matched.password);
       return true;
     }
     return false;
@@ -622,8 +986,13 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setAccessDeniedMessage(null);
     setAuthSuccessMessage(null);
     setPendingUnlockToken(null);
+    setNotifications([]);
+    setLiveToastNotifications([]);
+    setFirestoreError(null);
+    setFirebaseAuthUser(null);
+    notifiedChargeSessionsRef.current.clear();
     idTokenRef.current = null;
-    isFirebaseSessionRef.current = false;
+    isBackendSessionRef.current = false;
     signOut(auth).catch(() => {});
     setCurrentUser(null);
     setCurrentRoute('/login');
@@ -637,10 +1006,10 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
   };
 
-  // STEP 1 of Secure IoT Unlock: Generate time-sensitive 60s QR / 6-digit PIN (DOES NOT pop latch remotely!)
-  const generateUnlockToken = (
+  // STEP 1 of Secure IoT Unlock: Generate time-sensitive 5-minute QR / 6-digit PIN & email pass
+  const generateUnlockToken = async (
     paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash'
-  ): { success: boolean; message: string; token?: PendingUnlockToken } => {
+  ): Promise<{ success: boolean; message: string; token?: PendingUnlockToken }> => {
     sound.playTap();
 
     const slotToBook =
@@ -666,6 +1035,44 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       };
     }
 
+    if (isBackendSessionRef.current) {
+      try {
+        const data = await authorizedFetch('/api/kiosk/unlock-tokens', {
+          method: 'POST',
+          body: JSON.stringify({
+            stationId: selectedStation.id,
+            slotNumber: slotToBook.slotNumber,
+            serviceType: selectedService,
+            compartmentSize: selectedSize,
+            durationMinutes: selectedDuration,
+            paymentMethod,
+          }),
+        });
+        if (!data?.token) {
+          return {
+            success: false,
+            message: 'Session expired. Please sign in again to generate an unlock QR.',
+          };
+        }
+        const serverToken = data.token as PendingUnlockToken;
+        setPendingUnlockToken(serverToken);
+        setHardwareKioskStationId(selectedStation.id);
+
+        const emailSuffix = serverToken.emailSent
+          ? ` QR pass emailed to ${serverToken.emailSentTo}.`
+          : '';
+        return {
+          success: true,
+          message: `QR Unlock Token generated for ${selectedStation.name} Slot #${slotToBook.slotNumber}.${emailSuffix}`,
+          token: serverToken,
+        };
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Unable to generate unlock QR token.';
+        return { success: false, message };
+      }
+    }
+
     const now = Date.now();
     const randomPin = String(Math.floor(100000 + Math.random() * 900000));
     const tokenId = `TOK-${Math.floor(10000 + Math.random() * 90000)}`;
@@ -683,7 +1090,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       qrPayload: `UNICHARGE|${selectedStation.campusCode}|SLOT-${slotToBook.slotNumber}|PIN-${randomPin}|${tokenId}`,
       pinCode: randomPin,
       createdAt: now,
-      expiresAt: now + 60 * 1000,
+      expiresAt: now + 5 * 60 * 1000,
     };
 
     setPendingUnlockToken(token);
@@ -691,27 +1098,158 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     return {
       success: true,
-      message: `QR Unlock Token generated for ${selectedStation.name} Slot #${slotToBook.slotNumber}. Scan at the physical kiosk within 60 seconds.`,
+      message: `QR Unlock Token generated for ${selectedStation.name} Slot #${slotToBook.slotNumber}. Scan at the physical kiosk within 5 minutes.`,
       token,
     };
   };
 
-  const regenerateUnlockToken = () => {
-    if (!pendingUnlockToken) return;
-    generateUnlockToken(pendingUnlockToken.paymentMethod);
+  const regenerateUnlockToken = async () => {
+    const method = pendingUnlockToken?.paymentMethod || 'wallet';
+    return generateUnlockToken(method);
+  };
+
+  const resendUnlockQrEmail = async (): Promise<{
+    success: boolean;
+    message: string;
+    emailSentTo?: string;
+    emailSentFrom?: string;
+    deliveryMode?: 'smtp' | 'resend' | 'ethereal';
+    previewUrl?: string;
+  }> => {
+    sound.playTap();
+    if (!pendingUnlockToken) {
+      return {
+        success: false,
+        message: 'No active QR unlock token to email.',
+      };
+    }
+    if (!isBackendSessionRef.current) {
+      return {
+        success: false,
+        message: 'Sign in with a registered student account to email QR passes.',
+      };
+    }
+    try {
+      const data = await authorizedFetch('/api/kiosk/email-unlock-qr', {
+        method: 'POST',
+        body: JSON.stringify({ tokenId: pendingUnlockToken.tokenId }),
+      });
+      if (!data?.sent) {
+        return { success: false, message: 'Unable to send QR pass email.' };
+      }
+      setPendingUnlockToken((prev) =>
+        prev
+          ? {
+              ...prev,
+              emailSent: true,
+              emailSentTo: data.emailSentTo || prev.emailSentTo,
+              emailSentFrom: data.emailSentFrom || prev.emailSentFrom,
+              emailDeliveryMode: data.deliveryMode || prev.emailDeliveryMode,
+              emailError: undefined,
+              emailPreviewUrl: data.previewUrl || prev.emailPreviewUrl,
+            }
+          : null
+      );
+      return {
+        success: true,
+        message: `QR pass sent to ${data.emailSentTo}${data.emailSentFrom ? ` from ${data.emailSentFrom}` : ''}.`,
+        emailSentTo: data.emailSentTo,
+        emailSentFrom: data.emailSentFrom,
+        deliveryMode: data.deliveryMode,
+        previewUrl: data.previewUrl,
+      };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to send QR pass email.';
+      setPendingUnlockToken((prev) => (prev ? { ...prev, emailError: message } : null));
+      return { success: false, message };
+    }
   };
 
   const cancelPendingUnlock = () => {
     sound.playTap();
+    const activeTokenId = pendingUnlockToken?.tokenId;
     setPendingUnlockToken(null);
+    if (isBackendSessionRef.current && activeTokenId) {
+      authorizedFetch(`/api/kiosk/unlock-tokens/${encodeURIComponent(activeTokenId)}`, {
+        method: 'DELETE',
+      }).catch((err) => console.error('Cancel unlock token failed:', err));
+    }
   };
 
   // STEP 2 of Secure IoT Unlock: Triggered ONLY when physical kiosk scanner/PIN pad verifies the token!
-  const verifyKioskUnlock = (
+  const verifyKioskUnlock = async (
     pinOrQrPayload: string,
     kioskStationId?: string
-  ): { success: boolean; message: string } => {
+  ): Promise<{ success: boolean; message: string }> => {
     sound.playBeep();
+    const targetKioskId = kioskStationId || hardwareKioskStationId;
+
+    if (isBackendSessionRef.current) {
+      try {
+        const data = await authorizedFetch('/api/kiosk/verify-unlock', {
+          method: 'POST',
+          body: JSON.stringify({
+            pinOrQrPayload: pinOrQrPayload.trim(),
+            kioskStationId: targetKioskId,
+          }),
+        });
+        if (!data?.session) {
+          return {
+            success: false,
+            message: 'Session expired. Please sign in again.',
+          };
+        }
+
+        const verifiedSession = data.session as ActiveSession;
+        const updatedUser = data.user as UserAccount;
+        const updatedStations = Array.isArray(data.stations)
+          ? (data.stations as KioskStation[])
+          : null;
+
+        sound.playSolenoidRelease();
+        setTimeout(() => {
+          sound.playChargingConnected();
+        }, 450);
+
+        if (updatedUser) {
+          setCurrentUser(updatedUser);
+          setUsers((prev) =>
+            prev.map((u) => (u.id === updatedUser.id ? { ...u, ...updatedUser } : u))
+          );
+        }
+        if (updatedStations && updatedStations.length > 0) {
+          setStations(updatedStations);
+          setSelectedStation(
+            (prev) => updatedStations.find((s) => s.id === prev.id) || updatedStations[0]
+          );
+        }
+
+        setHardwareKioskStationId(verifiedSession.stationId);
+        setIsKioskDoorOpen(true);
+        setActiveKioskSlotReleased(verifiedSession.slotNumber);
+        setActiveSessionForCurrentUser(verifiedSession);
+        setPendingUnlockToken(null);
+
+        confetti({
+          particleCount: 55,
+          spread: 60,
+          origin: { y: 0.6 },
+          colors: ['#5BC496', '#4E6E81', '#FFFFFF'],
+        });
+
+        return {
+          success: true,
+          message:
+            data.message ||
+            `Kiosk Verified! Compartment #${verifiedSession.slotNumber} Solenoid Unlatched at ${verifiedSession.stationName}.`,
+        };
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Unable to verify kiosk unlock pass.';
+        return { success: false, message };
+      }
+    }
 
     if (!pendingUnlockToken) {
       return {
@@ -723,11 +1261,10 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     if (Date.now() > pendingUnlockToken.expiresAt) {
       return {
         success: false,
-        message: 'QR verification token expired (60s limit). Please regenerate a fresh Unlock QR.',
+        message: 'QR verification token expired (5-minute limit). Please regenerate a fresh Unlock QR.',
       };
     }
 
-    const targetKioskId = kioskStationId || hardwareKioskStationId;
     if (targetKioskId !== pendingUnlockToken.stationId) {
       return {
         success: false,
@@ -761,7 +1298,6 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }));
     }
 
-    // Fire physical ESP32 solenoid latch ONLY after kiosk scan verification!
     sound.playSolenoidRelease();
     setTimeout(() => {
       sound.playChargingConnected();
@@ -813,17 +1349,6 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     setActiveSessionForCurrentUser(newSession);
     setPendingUnlockToken(null);
-
-    if (isFirebaseSessionRef.current) {
-      authorizedFetch('/api/sessions/start', {
-        method: 'POST',
-        body: JSON.stringify({
-          session: newSession,
-          deductWalletAmount:
-            pendingUnlockToken.paymentMethod === 'wallet' ? pendingUnlockToken.totalFee : 0,
-        }),
-      }).catch((err) => console.error('Session sync failed:', err));
-    }
 
     confetti({
       particleCount: 55,
@@ -912,7 +1437,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     setActiveSessionForCurrentUser(newSession);
 
-    if (isFirebaseSessionRef.current) {
+    if (isBackendSessionRef.current) {
       authorizedFetch('/api/sessions/start', {
         method: 'POST',
         body: JSON.stringify({
@@ -980,7 +1505,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
     setActiveSessionForCurrentUser(null);
 
-    if (isFirebaseSessionRef.current) {
+    if (isBackendSessionRef.current) {
       authorizedFetch('/api/sessions/end', {
         method: 'POST',
         body: JSON.stringify({
@@ -1027,7 +1552,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const topUpWallet = (amount: number) => {
     sound.playTap();
     updateCurrentUserState((u) => ({ ...u, walletBalance: u.walletBalance + amount }));
-    if (isFirebaseSessionRef.current) {
+    if (isBackendSessionRef.current) {
       authorizedFetch('/api/wallet/topup', {
         method: 'POST',
         body: JSON.stringify({ amount }),
@@ -1045,7 +1570,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     sound.playTap();
     const next = !student.biometricEnabled;
     updateCurrentUserState((u) => ({ ...u, biometricEnabled: next }));
-    if (isFirebaseSessionRef.current) {
+    if (isBackendSessionRef.current) {
       authorizedFetch('/api/profile', {
         method: 'PATCH',
         body: JSON.stringify({ biometricEnabled: next }),
@@ -1057,7 +1582,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     sound.playTap();
     const next = !student.pushNotifications;
     updateCurrentUserState((u) => ({ ...u, pushNotifications: next }));
-    if (isFirebaseSessionRef.current) {
+    if (isBackendSessionRef.current) {
       authorizedFetch('/api/profile', {
         method: 'PATCH',
         body: JSON.stringify({ pushNotifications: next }),
@@ -1069,7 +1594,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     sound.playTap();
     const next = !student.overchargeAlerts;
     updateCurrentUserState((u) => ({ ...u, overchargeAlerts: next }));
-    if (isFirebaseSessionRef.current) {
+    if (isBackendSessionRef.current) {
       authorizedFetch('/api/profile', {
         method: 'PATCH',
         body: JSON.stringify({ overchargeAlerts: next }),
@@ -1097,7 +1622,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       ...(updates.degree !== undefined ? { degree: updates.degree } : {}),
       ...(updates.avatar !== undefined ? { avatar: updates.avatar } : {}),
     }));
-    if (isFirebaseSessionRef.current) {
+    if (isBackendSessionRef.current) {
       authorizedFetch('/api/profile', {
         method: 'PATCH',
         body: JSON.stringify(updates),
@@ -1105,33 +1630,213 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   };
 
-  const triggerSimulatedTamper = () => {
+  const pushNotificationEvent = useCallback(
+    async (input: CreateNotificationInput) => {
+      if (isFirestoreLive) {
+        try {
+          const wrote = await createFirestoreNotification(input);
+          if (wrote) return;
+        } catch (err) {
+          console.error('Failed to persist notification to Firestore:', err);
+          setFirestoreError(err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      const fallbackNotif: DashboardNotification = {
+        id: input.id,
+        userUid: currentUser?.id || 'local-user',
+        sessionId: input.sessionId,
+        stationId: input.stationId,
+        stationCode: input.stationCode,
+        stationName: input.stationName,
+        slotNumber: input.slotNumber,
+        type: input.type,
+        severity: input.severity,
+        title: input.title,
+        message: input.message,
+        read: false,
+        createdAtMs: Date.now(),
+        source: 'local',
+      };
+
+      if (fallbackNotif.type === 'unexpected_door_open') {
+        sound.playTamperAlarm();
+      } else {
+        sound.playChargingConnected();
+      }
+
+      setNotifications((prev) => {
+        if (prev.some((n) => n.id === fallbackNotif.id)) return prev;
+        return [fallbackNotif, ...prev];
+      });
+      setLiveToastNotifications((prev) => {
+        if (prev.some((n) => n.id === fallbackNotif.id)) return prev;
+        return [fallbackNotif, ...prev].slice(0, 4);
+      });
+    },
+    [currentUser?.id, isFirestoreLive]
+  );
+
+  // Automatic real-time Firestore alert when active session reaches 100% battery
+  useEffect(() => {
+    if (!activeSession || !currentUser) return;
+    if (activeSession.batteryCurrent < 100) return;
+    if (notifiedChargeSessionsRef.current.has(activeSession.sessionId)) return;
+
+    notifiedChargeSessionsRef.current.add(activeSession.sessionId);
+    const station = stations.find((s) => s.id === activeSession.stationId);
+    const stationCode = station?.campusCode || 'USTP-CITC-K01';
+
+    void pushNotificationEvent({
+      id: `chg_${activeSession.sessionId}`,
+      sessionId: activeSession.sessionId,
+      stationId: activeSession.stationId,
+      stationCode,
+      stationName: activeSession.stationName,
+      slotNumber: activeSession.slotNumber,
+      type: 'charge_complete',
+      severity: 'info',
+      title: 'Device Fully Charged (100%)',
+      message: `Compartment #${activeSession.slotNumber} at ${activeSession.stationName} has reached 100%. Overcharge auto cut-off is protecting your battery — retrieve your device anytime.`,
+    });
+  }, [activeSession, currentUser, pushNotificationEvent, stations]);
+
+  const dismissLiveToast = useCallback((id: string) => {
+    setLiveToastNotifications((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  const markNotificationRead = useCallback(
+    async (id: string) => {
+      setLiveToastNotifications((prev) => prev.filter((item) => item.id !== id));
+      setNotifications((prev) =>
+        prev.map((item) => (item.id === id ? { ...item, read: true } : item))
+      );
+      if (isFirestoreLive) {
+        try {
+          await markFirestoreNotificationRead(id);
+        } catch (err) {
+          console.error('Mark notification read failed:', err);
+        }
+      }
+    },
+    [isFirestoreLive]
+  );
+
+  const markAllNotificationsRead = useCallback(async () => {
+    const unread = notifications.filter((n) => !n.read);
+    setLiveToastNotifications([]);
+    setNotifications((prev) => prev.map((item) => ({ ...item, read: true })));
+    if (isFirestoreLive && unread.length > 0) {
+      await Promise.allSettled(unread.map((item) => markFirestoreNotificationRead(item.id)));
+    }
+  }, [isFirestoreLive, notifications]);
+
+  const deleteNotification = useCallback(
+    async (id: string) => {
+      setLiveToastNotifications((prev) => prev.filter((item) => item.id !== id));
+      setNotifications((prev) => prev.filter((item) => item.id !== id));
+      if (isFirestoreLive) {
+        try {
+          await deleteFirestoreNotification(id);
+        } catch (err) {
+          console.error('Delete notification failed:', err);
+        }
+      }
+    },
+    [isFirestoreLive]
+  );
+
+  const simulateFullCharge = async () => {
+    if (!activeSession || !currentUser) return;
+    sound.playChargingConnected();
+    setActiveSessionForCurrentUser((prev) =>
+      prev
+        ? {
+            ...prev,
+            batteryCurrent: 100,
+            chargingRateWatts: 0,
+            status: 'completed',
+          }
+        : null
+    );
+  };
+
+  const triggerUnexpectedDoorOpen = async (stationId?: string, slotNumber?: number) => {
+    const targetStationId =
+      stationId || activeSession?.stationId || hardwareKioskStationId || stations[0]?.id;
+    const targetStation = stations.find((s) => s.id === targetStationId) || stations[0];
+    const targetSlotNumber =
+      slotNumber ||
+      activeSession?.slotNumber ||
+      targetStation?.slots.find((s) => s.status === 'in_use')?.slotNumber ||
+      1;
+    const targetSessionId =
+      activeSession?.sessionId || `SES_${targetStation?.campusCode || 'KIOSK'}_${targetSlotNumber}`;
+
     sound.playTamperAlarm();
+    setHardwareKioskStationId(targetStationId);
+    setIsKioskDoorOpen(true);
+    setActiveKioskSlotReleased(targetSlotNumber);
+
+    setStations((prev) =>
+      prev.map((st) => {
+        if (st.id !== targetStationId) return st;
+        return {
+          ...st,
+          slots: st.slots.map((s) =>
+            s.slotNumber === targetSlotNumber
+              ? { ...s, isDoorOpen: true, isLocked: false }
+              : s
+          ),
+        };
+      })
+    );
+
     if (activeSession) {
       setActiveSessionForCurrentUser((prev) =>
         prev
           ? {
               ...prev,
               isTamperAlertArmed: true,
-              lockerTemperature: +(prev.lockerTemperature + 3.2).toFixed(1),
+              lockerTemperature: +(prev.lockerTemperature + 2.4).toFixed(1),
             }
           : null
       );
-      setSecurityAlerts((prev) => [
-        {
-          id: `alt-${Date.now()}`,
-          timestamp: 'Just now',
-          stationCode: 'USTP-CITC-K01',
-          stationName: activeSession.stationName,
-          slotNumber: activeSession.slotNumber,
-          severity: 'critical',
-          type: 'Tamper Vibration',
-          message: `Triaxial accelerometer threshold triggered on Slot #${activeSession.slotNumber}.`,
-          resolved: false,
-        },
-        ...prev,
-      ]);
     }
+
+    setSecurityAlerts((prev) => [
+      {
+        id: `alt-${Date.now()}`,
+        timestamp: 'Just now',
+        stationCode: targetStation?.campusCode || 'USTP-CITC-K01',
+        stationName: targetStation?.name || 'CITC Building 1st Fl Lounge',
+        slotNumber: targetSlotNumber,
+        severity: 'critical',
+        type: 'Tamper Vibration',
+        message: `Unexpected door opening detected on Compartment #${targetSlotNumber} without QR/PIN retrieval authorization.`,
+        resolved: false,
+      },
+      ...prev,
+    ]);
+
+    await pushNotificationEvent({
+      id: `door_${targetSessionId}_${Date.now()}`,
+      sessionId: targetSessionId,
+      stationId: targetStationId,
+      stationCode: targetStation?.campusCode || 'USTP-CITC-K01',
+      stationName: targetStation?.name || 'CITC Building 1st Fl Lounge',
+      slotNumber: targetSlotNumber,
+      type: 'unexpected_door_open',
+      severity: 'critical',
+      title: 'Locker Door Opened Unexpectedly!',
+      message: `Compartment #${targetSlotNumber} at ${
+        targetStation?.name || 'USTP Kiosk'
+      } unlatched without authorization. Check your device or tap Kiosk Scanner immediately.`,
+    });
+  };
+
+  const triggerSimulatedTamper = () => {
+    void triggerUnexpectedDoorOpen(activeSession?.stationId, activeSession?.slotNumber);
   };
 
   const adminRemoteUnlockSlot = (stationId: string, slotNumber: number) => {
@@ -1157,7 +1862,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       })
     );
 
-    if (isFirebaseSessionRef.current) {
+    if (isBackendSessionRef.current) {
       authorizedFetch('/api/admin/slots/update', {
         method: 'POST',
         body: JSON.stringify({
@@ -1192,7 +1897,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       })
     );
 
-    if (isFirebaseSessionRef.current) {
+    if (isBackendSessionRef.current) {
       authorizedFetch('/api/admin/slots/update', {
         method: 'POST',
         body: JSON.stringify({
@@ -1204,7 +1909,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   };
 
-  const adminProvisionStaff = ({
+  const adminProvisionStaff = async ({
     name,
     email,
     staffId,
@@ -1214,7 +1919,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     email: string;
     staffId: string;
     password: string;
-  }): AuthResult => {
+  }): Promise<AuthResult> => {
     if (currentUser?.role !== 'admin') {
       return { success: false, error: 'Unauthorized: Admin role required.' };
     }
@@ -1222,36 +1927,31 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     if (!name.trim() || !cleanEmail || !staffId.trim() || !password) {
       return { success: false, error: 'All staff provisioning fields are required.' };
     }
-    if (
-      users.some(
-        (u) =>
-          u.email.toLowerCase() === cleanEmail ||
-          u.studentIdNumber.toLowerCase() === staffId.trim().toLowerCase()
-      )
-    ) {
-      return { success: false, error: 'Staff email or ID already exists.' };
+
+    try {
+      const data = await authorizedFetch('/api/admin/staff', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: name.trim(),
+          email: cleanEmail,
+          staffId: staffId.trim(),
+          password,
+        }),
+      });
+      if (data?.user) {
+        const created = data.user as UserAccount;
+        setUsers((prev) => [
+          created,
+          ...prev.filter((u) => u.id !== created.id && u.email !== created.email),
+        ]);
+        return { success: true, user: created };
+      }
+      return { success: false, error: 'Session expired. Please sign in again.' };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to provision staff account.';
+      return { success: false, error: message };
     }
-
-    const newAdmin: UserAccount = {
-      id: `usr_admin_${Date.now()}`,
-      name: name.trim(),
-      studentIdNumber: staffId.trim().toUpperCase(),
-      email: cleanEmail,
-      password,
-      role: 'admin',
-      college: 'USTP ICT Infrastructure & Smart Campus Operations',
-      degree: 'Station Operations Staff',
-      avatar: '',
-      walletBalance: 0,
-      biometricEnabled: true,
-      pushNotifications: true,
-      overchargeAlerts: true,
-      preferredPayment: 'wallet',
-      createdAt: new Date().toISOString().split('T')[0],
-    };
-
-    setUsers((prev) => [newAdmin, ...prev]);
-    return { success: true, user: newAdmin };
   };
 
   const resolveSecurityAlert = (alertId: string) => {
@@ -1260,7 +1960,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setSecurityAlerts((prev) =>
       prev.map((a) => (a.id === alertId ? { ...a, resolved: true } : a))
     );
-    if (isFirebaseSessionRef.current) {
+    if (isBackendSessionRef.current) {
       authorizedFetch('/api/admin/alerts/resolve', {
         method: 'POST',
         body: JSON.stringify({ alertId }),
@@ -1297,8 +1997,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         activeKioskSlotReleased,
         loginWithAccount,
         loginWithGoogle,
+        completeGoogleOnboarding,
         loginDemoByEmail,
+        sendSignupVerificationCode,
         registerStudentAccount,
+        sendPasswordResetCode,
+        resetPasswordWithCode,
         loginDemo,
         loginWithCredentials,
         logout,
@@ -1310,6 +2014,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         calculateFee,
         generateUnlockToken,
         regenerateUnlockToken,
+        resendUnlockQrEmail,
         cancelPendingUnlock,
         verifyKioskUnlock,
         unlockStationViaQr,
@@ -1321,7 +2026,18 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         updateUserProfile,
         closeKioskDoor,
         triggerSimulatedTamper,
+        simulateFullCharge,
+        triggerUnexpectedDoorOpen,
         setHardwareKioskStationId,
+        notifications,
+        liveToastNotifications,
+        unreadNotificationCount: notifications.filter((n) => !n.read).length,
+        isFirestoreLive,
+        firestoreError,
+        dismissLiveToast,
+        markNotificationRead,
+        markAllNotificationsRead,
+        deleteNotification,
         adminRemoteUnlockSlot,
         adminToggleSlotMaintenance,
         adminProvisionStaff,

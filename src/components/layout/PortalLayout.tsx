@@ -17,11 +17,13 @@ import {
   Cpu,
   Users,
   ShieldAlert,
-  Smartphone,
+  ScanLine,
   ShieldOff,
   X,
   User,
   ChevronRight,
+  Check,
+  Trash2,
 } from 'lucide-react';
 import { StudentPortalView, StudentSection } from '../portal/StudentPortalView';
 import { AdminPortalView, AdminSection } from '../portal/AdminPortalView';
@@ -37,12 +39,20 @@ export const PortalLayout: React.FC = () => {
     accessDeniedMessage,
     clearAccessDenied,
     logout,
+    notifications,
+    liveToastNotifications,
+    unreadNotificationCount,
+    isFirestoreLive,
+    dismissLiveToast,
+    markNotificationRead,
+    markAllNotificationsRead,
+    deleteNotification,
   } = useUniCharge();
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [studentSection, setStudentSection] = useState<StudentSection>(
-    currentRoute === '/mobile-expo' ? 'mobile' : 'dashboard'
+    currentRoute === '/kiosk' ? 'kiosk' : 'dashboard'
   );
   const [adminSection, setAdminSection] = useState<AdminSection>('overview');
   const [showProfileView, setShowProfileView] = useState(false);
@@ -50,9 +60,9 @@ export const PortalLayout: React.FC = () => {
 
   useEffect(() => {
     if (currentUser?.role !== 'student') return;
-    if (currentRoute === '/mobile-expo') {
-      setStudentSection('mobile');
-    } else if (currentRoute === '/student/dashboard' && studentSection === 'mobile') {
+    if (currentRoute === '/kiosk') {
+      setStudentSection('kiosk');
+    } else if (currentRoute === '/student/dashboard' && studentSection === 'kiosk') {
       setStudentSection('dashboard');
     }
   }, [currentRoute, currentUser?.role]);
@@ -87,7 +97,7 @@ export const PortalLayout: React.FC = () => {
     },
     { id: 'wallet', label: 'Wallet & Coins', icon: Wallet },
     { id: 'booking', label: 'Reserve a Locker', icon: Zap },
-    { id: 'mobile', label: 'Mobile & Expo', icon: Smartphone },
+    { id: 'kiosk', label: 'Kiosk Scanner', icon: ScanLine },
   ];
 
   const adminNavItems: {
@@ -110,8 +120,8 @@ export const PortalLayout: React.FC = () => {
   const handleStudentSectionChange = (nextSection: StudentSection) => {
     setShowProfileView(false);
     setStudentSection(nextSection);
-    if (nextSection === 'mobile') {
-      navigate('/mobile-expo');
+    if (nextSection === 'kiosk') {
+      navigate('/kiosk');
     } else {
       navigate('/student/dashboard');
     }
@@ -282,41 +292,146 @@ export const PortalLayout: React.FC = () => {
               className="w-10 h-10 rounded-xl flex items-center justify-center text-[#64748B] hover:bg-[#EDF2F5] hover:text-[#4E6E81] relative cursor-pointer transition-colors"
             >
               <Bell className="w-5 h-5" />
-              {((isAdmin && unresolvedCount > 0) || (!isAdmin && activeSession)) && (
-                <span className="w-2.5 h-2.5 rounded-full bg-[#5BC496] absolute top-2 right-2 ring-2 ring-white" />
+              {((isAdmin && unresolvedCount > 0) ||
+                (!isAdmin && (unreadNotificationCount > 0 || activeSession))) && (
+                <span
+                  className={`min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center absolute -top-0.5 -right-0.5 ring-2 ring-white ${
+                    !isAdmin &&
+                    notifications.some(
+                      (n) => !n.read && n.type === 'unexpected_door_open'
+                    )
+                      ? 'bg-[#DC2626] text-white animate-pulse'
+                      : 'bg-[#5BC496] text-[#1E293B]'
+                  }`}
+                >
+                  {isAdmin
+                    ? unresolvedCount
+                    : unreadNotificationCount > 0
+                    ? unreadNotificationCount
+                    : '•'}
+                </span>
               )}
             </button>
 
             {showNotifs && (
-              <div className="absolute right-0 mt-2 w-72 bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] shadow-xl p-4 z-50">
-                <div className="flex items-center justify-between pb-2 border-b border-[#E2E8F0]">
-                  <span className="text-xs font-bold text-[#4E6E81]">Notifications</span>
-                  <button
-                    onClick={() => setShowNotifs(false)}
-                    className="text-xs text-[#64748B] hover:text-[#1E293B] cursor-pointer"
-                  >
-                    Close
-                  </button>
+              <div className="absolute right-0 mt-2 w-80 sm:w-96 bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] shadow-2xl p-4 z-50">
+                <div className="flex items-center justify-between pb-2.5 border-b border-[#E2E8F0] gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-[#4E6E81]">Notifications</span>
+                    <span
+                      className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                        isFirestoreLive
+                          ? 'bg-[#EBF9F3] text-[#1E293B]'
+                          : 'bg-[#EDF2F5] text-[#64748B]'
+                      }`}
+                    >
+                      {isFirestoreLive ? 'Firestore Live' : 'Local Alerts'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2.5">
+                    {!isAdmin && unreadNotificationCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => void markAllNotificationsRead()}
+                        className="text-[11px] font-semibold text-[#4E6E81] hover:underline cursor-pointer"
+                      >
+                        Mark all read
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setShowNotifs(false)}
+                      className="text-xs text-[#64748B] hover:text-[#1E293B] cursor-pointer"
+                    >
+                      Close
+                    </button>
+                  </div>
                 </div>
-                <div className="py-2 space-y-2 text-xs">
+
+                <div className="py-2 space-y-2 text-xs max-h-80 overflow-y-auto">
                   {isAdmin ? (
-                    securityAlerts.slice(0, 3).map((al) => (
+                    securityAlerts.slice(0, 5).map((al) => (
                       <div key={al.id} className="p-2.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
                         <span className="font-semibold text-[#1E293B] block">{al.type}</span>
-                        <span className="text-[#64748B] text-[11px]">{al.stationCode} · {al.timestamp}</span>
+                        <span className="text-[#64748B] text-[11px]">
+                          {al.stationCode} · Slot #{al.slotNumber} · {al.timestamp}
+                        </span>
                       </div>
                     ))
-                  ) : (
-                    <div className="p-2.5 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/30">
+                  ) : notifications.length === 0 ? (
+                    <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-center space-y-1">
                       <span className="font-semibold text-[#1E293B] block">
                         {activeSession
                           ? `Slot #${activeSession.slotNumber} Charging (${activeSession.batteryCurrent}%)`
-                          : 'All Campus Kiosks Online'}
+                          : 'No real-time alerts yet'}
                       </span>
-                      <span className="text-[#64748B] text-[11px]">
-                        Overcharge auto cut-off protection is active.
+                      <span className="text-[#64748B] text-[11px] block">
+                        You will be alerted instantly when battery reaches 100% or if a locker door opens unexpectedly.
                       </span>
                     </div>
+                  ) : (
+                    notifications.slice(0, 10).map((n) => {
+                      const isCritical = n.type === 'unexpected_door_open';
+                      return (
+                        <div
+                          key={n.id}
+                          className={`p-2.5 rounded-xl border transition-colors ${
+                            isCritical
+                              ? n.read
+                                ? 'bg-red-50/40 border-red-200/70'
+                                : 'bg-red-50 border-[#DC2626]/50'
+                              : n.read
+                              ? 'bg-[#F8FAFC] border-[#E2E8F0]'
+                              : 'bg-[#EBF9F3] border-[#5BC496]/50'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-start gap-2 min-w-0">
+                              {isCritical ? (
+                                <ShieldAlert className="w-4 h-4 text-[#DC2626] shrink-0 mt-0.5" />
+                              ) : (
+                                <BatteryCharging className="w-4 h-4 text-[#5BC496] shrink-0 mt-0.5" />
+                              )}
+                              <div className="min-w-0">
+                                <span className="font-bold text-[#1E293B] block truncate">
+                                  {n.title}
+                                </span>
+                                <p className="text-[11px] text-[#475569] leading-snug mt-0.5">
+                                  {n.message}
+                                </p>
+                                <span className="text-[10px] font-mono text-[#64748B] mt-1 block">
+                                  {n.stationCode} · Slot #{n.slotNumber} ·{' '}
+                                  {new Date(n.createdAtMs).toLocaleTimeString([], {
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                  })}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              {!n.read && (
+                                <button
+                                  type="button"
+                                  title="Mark as read"
+                                  onClick={() => void markNotificationRead(n.id)}
+                                  className="w-6 h-6 rounded-lg bg-white border border-[#E2E8F0] text-[#4E6E81] hover:text-[#5BC496] flex items-center justify-center cursor-pointer"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                title="Delete notification"
+                                onClick={() => void deleteNotification(n.id)}
+                                className="w-6 h-6 rounded-lg bg-white border border-[#E2E8F0] text-[#64748B] hover:text-[#DC2626] flex items-center justify-center cursor-pointer"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               </div>
@@ -383,6 +498,87 @@ export const PortalLayout: React.FC = () => {
 
         {/* Main Content Canvas */}
         <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto w-full">
+          {/* Real-Time Firestore Snapshot Toast Stack */}
+          {!isAdmin && liveToastNotifications.length > 0 && (
+            <div
+              aria-live="assertive"
+              className="fixed top-20 right-4 z-50 w-[min(24rem,calc(100vw-2rem))] space-y-2.5 pointer-events-none"
+            >
+              {liveToastNotifications.map((toast) => {
+                const isCritical = toast.type === 'unexpected_door_open';
+                return (
+                  <div
+                    key={toast.id}
+                    role="alert"
+                    className={`pointer-events-auto rounded-2xl border shadow-2xl p-4 bg-[#FFFFFF] flex items-start gap-3 ${
+                      isCritical
+                        ? 'border-[#DC2626] border-l-4 border-l-[#DC2626]'
+                        : 'border-[#5BC496] border-l-4 border-l-[#5BC496]'
+                    }`}
+                  >
+                    <div
+                      className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                        isCritical ? 'bg-red-50 text-[#DC2626]' : 'bg-[#EBF9F3] text-[#4E6E81]'
+                      }`}
+                    >
+                      {isCritical ? (
+                        <ShieldAlert className="w-5 h-5 text-[#DC2626]" />
+                      ) : (
+                        <BatteryCharging className="w-5 h-5 text-[#5BC496]" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span
+                          className={`text-[10px] font-bold uppercase tracking-wider ${
+                            isCritical ? 'text-[#DC2626]' : 'text-[#5BC496]'
+                          }`}
+                        >
+                          {isCritical ? 'Security Alert · Live' : 'Charging Complete · Live'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => dismissLiveToast(toast.id)}
+                          aria-label="Dismiss live alert"
+                          className="text-[#64748B] hover:text-[#1E293B] cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      <h4 className="text-xs font-bold text-[#1E293B] mt-0.5">{toast.title}</h4>
+                      <p className="text-[11px] text-[#475569] mt-0.5 leading-snug">
+                        {toast.message}
+                      </p>
+                      <div className="flex items-center gap-2 mt-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void markNotificationRead(toast.id);
+                            handleStudentSectionChange(isCritical ? 'kiosk' : 'sessions');
+                          }}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer ${
+                            isCritical
+                              ? 'bg-[#DC2626] text-white hover:bg-red-700'
+                              : 'bg-[#4E6E81] text-white hover:bg-[#3D5767]'
+                          }`}
+                        >
+                          {isCritical ? 'Check Kiosk' : 'Retrieve Device'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void markNotificationRead(toast.id)}
+                          className="px-2.5 py-1 rounded-lg border border-[#E2E8F0] text-[11px] font-semibold text-[#64748B] hover:text-[#1E293B] cursor-pointer"
+                        >
+                          Mark Read
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {/* RBAC Access Denied Toast/Banner */}
           {accessDeniedMessage && (
             <div

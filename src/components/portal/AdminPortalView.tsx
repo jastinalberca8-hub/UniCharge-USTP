@@ -68,10 +68,10 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
   const selectedHwStation =
     stations.find((s) => s.id === hardwareKioskStationId) || stations[0];
 
-  const handleCreateStaff = (e: React.FormEvent) => {
+  const handleCreateStaff = async (e: React.FormEvent) => {
     e.preventDefault();
     setProvisionError(null);
-    const res = adminProvisionStaff({
+    const res = await adminProvisionStaff({
       name: staffName,
       email: staffEmail,
       staffId,

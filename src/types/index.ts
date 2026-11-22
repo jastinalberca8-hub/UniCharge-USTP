@@ -51,6 +51,12 @@ export interface PendingUnlockToken {
   pinCode: string;
   createdAt: number;
   expiresAt: number;
+  emailSent?: boolean;
+  emailSentTo?: string;
+  emailSentFrom?: string;
+  emailDeliveryMode?: 'smtp' | 'resend' | 'ethereal';
+  emailError?: string;
+  emailPreviewUrl?: string;
 }
 
 export interface ActiveSession {
@@ -90,6 +96,8 @@ export interface UserAccount {
   pushNotifications: boolean;
   overchargeAlerts: boolean;
   preferredPayment: 'wallet' | 'gcash' | 'maya';
+  emailVerified?: boolean;
+  profileCompleted?: boolean;
   createdAt: string;
 }
 
@@ -119,3 +127,25 @@ export interface SecurityAlert {
   message: string;
   resolved: boolean;
 }
+
+export type DashboardNotificationType = 'charge_complete' | 'unexpected_door_open';
+
+export type DashboardNotificationSeverity = 'info' | 'critical';
+
+export interface DashboardNotification {
+  id: string;
+  userUid: string;
+  sessionId: string;
+  stationId: string;
+  stationCode: string;
+  stationName: string;
+  slotNumber: number;
+  type: DashboardNotificationType;
+  severity: DashboardNotificationSeverity;
+  title: string;
+  message: string;
+  read: boolean;
+  createdAtMs: number;
+  source?: 'firestore' | 'local';
+}
+

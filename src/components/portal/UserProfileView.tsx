@@ -1,5 +1,11 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { useUniCharge } from '../../context/UniChargeContext';
+import {
+  ALLOWED_USTP_COLLEGE_VALUES,
+  USTP_COLLEGES,
+  getCoursesForCollege,
+  isCourseValidForCollege,
+} from '../../constants/colleges';
 import { sound } from '../../utils/audio';
 import { UserAvatar } from '../brand/UserAvatar';
 import {
@@ -85,14 +91,35 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({ onBackToDashbo
       setFeedback({ type: 'error', text: 'Full name cannot be empty.' });
       return;
     }
+    const cleanCollege = college.trim();
+    const cleanDegree = degree.trim();
+    if (!isAdmin) {
+      if (!ALLOWED_USTP_COLLEGE_VALUES.has(cleanCollege)) {
+        setFeedback({ type: 'error', text: 'Please select a valid USTP College from the list.' });
+        return;
+      }
+      if (!cleanDegree) {
+        setFeedback({ type: 'error', text: 'Please select your Course / Program from the list.' });
+        return;
+      }
+      if (!isCourseValidForCollege(cleanCollege, cleanDegree)) {
+        setFeedback({
+          type: 'error',
+          text: 'Selected course does not belong to the chosen college.',
+        });
+        return;
+      }
+    }
     sound.playTap();
     updateUserProfile({
       name: name.trim(),
-      college: college.trim(),
-      degree: degree.trim(),
+      college: cleanCollege,
+      degree: cleanDegree,
     });
     setFeedback({ type: 'success', text: 'Personal information saved successfully.' });
   };
+
+  const availableCourses = getCoursesForCollege(college);
 
   return (
     <div className="max-w-4xl space-y-6">
@@ -183,6 +210,9 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({ onBackToDashbo
               {currentUser.studentIdNumber}
             </span>
             <p className="text-xs text-[#64748B] mt-1">{currentUser.degree}</p>
+            {currentUser.college && (
+              <p className="text-[11px] text-[#94A3B8] mt-0.5">{currentUser.college}</p>
+            )}
 
             <div className="w-full flex flex-col gap-2 mt-4">
               <button
@@ -304,35 +334,103 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({ onBackToDashbo
               </div>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-[#1E293B] mb-1.5">
-                College / Department
-              </label>
-              <div className="relative">
-                <Building2 className="w-4 h-4 text-[#64748B] absolute left-3 top-3" />
-                <input
-                  type="text"
-                  value={college}
-                  onChange={(e) => setCollege(e.target.value)}
-                  className="w-full h-10 pl-9 pr-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15"
-                />
-              </div>
-            </div>
+            {isAdmin ? (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold text-[#1E293B] mb-1.5">
+                    College / Department
+                  </label>
+                  <div className="relative">
+                    <Building2 className="w-4 h-4 text-[#64748B] absolute left-3 top-3" />
+                    <input
+                      type="text"
+                      value={college}
+                      onChange={(e) => setCollege(e.target.value)}
+                      className="w-full h-10 pl-9 pr-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15"
+                    />
+                  </div>
+                </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-[#1E293B] mb-1.5">
-                {isAdmin ? 'Role Title' : 'Degree / Program'}
-              </label>
-              <div className="relative">
-                <GraduationCap className="w-4 h-4 text-[#64748B] absolute left-3 top-3" />
-                <input
-                  type="text"
-                  value={degree}
-                  onChange={(e) => setDegree(e.target.value)}
-                  className="w-full h-10 pl-9 pr-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15"
-                />
-              </div>
-            </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#1E293B] mb-1.5">
+                    Role Title
+                  </label>
+                  <div className="relative">
+                    <GraduationCap className="w-4 h-4 text-[#64748B] absolute left-3 top-3" />
+                    <input
+                      type="text"
+                      value={degree}
+                      onChange={(e) => setDegree(e.target.value)}
+                      className="w-full h-10 pl-9 pr-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15"
+                    />
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <label
+                    htmlFor="profile-college"
+                    className="block text-xs font-semibold text-[#1E293B] mb-1.5"
+                  >
+                    College / Department
+                  </label>
+                  <div className="relative">
+                    <Building2 className="w-4 h-4 text-[#64748B] absolute left-3 top-3 pointer-events-none" />
+                    <select
+                      id="profile-college"
+                      value={ALLOWED_USTP_COLLEGE_VALUES.has(college) ? college : ''}
+                      onChange={(e) => {
+                        setCollege(e.target.value);
+                        setDegree('');
+                      }}
+                      required
+                      className="w-full h-10 pl-9 pr-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15"
+                    >
+                      <option value="" disabled>
+                        Select College...
+                      </option>
+                      {USTP_COLLEGES.map((col) => (
+                        <option key={col.code} value={col.value}>
+                          {col.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="profile-course"
+                    className="block text-xs font-semibold text-[#1E293B] mb-1.5"
+                  >
+                    Course / Program
+                  </label>
+                  <div className="relative">
+                    <GraduationCap className="w-4 h-4 text-[#64748B] absolute left-3 top-3 pointer-events-none" />
+                    <select
+                      id="profile-course"
+                      value={availableCourses.includes(degree) ? degree : ''}
+                      onChange={(e) => setDegree(e.target.value)}
+                      disabled={!ALLOWED_USTP_COLLEGE_VALUES.has(college)}
+                      required
+                      className="w-full h-10 pl-9 pr-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15 disabled:bg-[#F8FAFC] disabled:text-[#94A3B8] disabled:cursor-not-allowed"
+                    >
+                      <option value="" disabled>
+                        {ALLOWED_USTP_COLLEGE_VALUES.has(college)
+                          ? 'Select Course / Program...'
+                          : 'Select a college first...'}
+                      </option>
+                      {availableCourses.map((prog) => (
+                        <option key={prog} value={prog}>
+                          {prog}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </>
+            )}
 
             <div className="pt-2 flex justify-end">
               <button

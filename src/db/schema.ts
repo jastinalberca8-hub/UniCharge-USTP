@@ -15,6 +15,7 @@ export const users = pgTable('users', {
   name: text('name').notNull(),
   studentIdNumber: text('student_id_number').notNull(),
   email: text('email').notNull().unique(),
+  passwordHash: text('password_hash'),
   role: text('role').notNull().default('student'),
   college: text('college')
     .notNull()
@@ -26,6 +27,17 @@ export const users = pgTable('users', {
   pushNotifications: boolean('push_notifications').notNull().default(true),
   overchargeAlerts: boolean('overcharge_alerts').notNull().default(true),
   preferredPayment: text('preferred_payment').notNull().default('wallet'),
+  emailVerified: boolean('email_verified').notNull().default(false),
+  profileCompleted: boolean('profile_completed').notNull().default(false),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const emailVerifications = pgTable('email_verifications', {
+  id: serial('id').primaryKey(),
+  email: text('email').notNull().unique(),
+  codeHash: text('code_hash').notNull(),
+  attempts: integer('attempts').notNull().default(0),
+  expiresAt: timestamp('expires_at').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
@@ -90,6 +102,28 @@ export const sessions = pgTable('sessions', {
   qrVerificationCode: text('qr_verification_code').notNull(),
   receiptNumber: text('receipt_number'),
   dateLabel: text('date_label'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const lockerUnlockTokens = pgTable('locker_unlock_tokens', {
+  id: serial('id').primaryKey(),
+  tokenId: text('token_id').notNull().unique(),
+  userUid: text('user_uid')
+    .references(() => users.uid)
+    .notNull(),
+  stationId: text('station_id').notNull(),
+  stationName: text('station_name').notNull(),
+  stationCode: text('station_code').notNull(),
+  slotNumber: integer('slot_number').notNull(),
+  serviceType: text('service_type').notNull(),
+  compartmentSize: text('compartment_size').notNull(),
+  durationMinutes: integer('duration_minutes').notNull(),
+  totalFee: doublePrecision('total_fee').notNull(),
+  paymentMethod: text('payment_method').notNull(),
+  pinCode: text('pin_code').notNull(),
+  qrPayload: text('qr_payload').notNull().unique(),
+  used: boolean('used').notNull().default(false),
+  expiresAt: timestamp('expires_at').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 

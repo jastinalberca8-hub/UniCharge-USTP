@@ -1,0 +1,124 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'admin@ustp.edu.ph' ||
+        request.auth.token.email == 'jastinalberca8@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll([
+          'userUid',
+          'sessionId',
+          'stationId',
+          'stationCode',
+          'stationName',
+          'slotNumber',
+          'type',
+          'severity',
+          'title',
+          'message',
+          'read',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userUid',
+          'sessionId',
+          'stationId',
+          'stationCode',
+          'stationName',
+          'slotNumber',
+          'type',
+          'severity',
+          'title',
+          'message',
+          'read',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.userUid is string && data.userUid.size() >= 1 && data.userUid.size() <= 128 && data.userUid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.sessionId is string && data.sessionId.size() >= 1 && data.sessionId.size() <= 64 && data.sessionId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.stationId is string && data.stationId.size() >= 1 && data.stationId.size() <= 64 && data.stationId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.stationCode is string && data.stationCode.size() >= 1 && data.stationCode.size() <= 32 && data.stationCode.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.stationName is string && data.stationName.size() >= 1 && data.stationName.size() <= 120
+        && data.slotNumber is int && data.slotNumber >= 1 && data.slotNumber <= 64
+        && data.type in ['charge_complete', 'unexpected_door_open']
+        && data.severity in ['info', 'critical']
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 400
+        && data.read is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Boot connectivity probe document (read-only single doc for signed-in users)
+    match /test/connection {
+      allow get: if isSignedIn();
+      allow list, write: if false;
+    }
+
+    // Read-only admin marker collection
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && request.auth.uid == adminId;
+      allow list, write: if false;
+    }
+
+    // Real-time charging & unexpected door open notifications
+    match /notifications/{notificationId} {
+      allow get: if isSignedIn() && isValidId(notificationId) && (existing().userUid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && resource.data.userUid == request.auth.uid;
+
+      allow create: if isSignedIn()
+        && isValidId(notificationId)
+        && isValidNotification(incoming())
+        && incoming().userUid == request.auth.uid
+        && incoming().read == false
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(notificationId)
+        && isValidNotification(incoming())
+        && (
+          isAdmin() ||
+          (
+            existing().userUid == request.auth.uid
+            && existing().read == false
+            && incoming().read == true
+            && incoming().userUid == existing().userUid
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly(['read', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isSignedIn() && isValidId(notificationId) && (existing().userUid == request.auth.uid || isAdmin());
+    }
+  }
+}

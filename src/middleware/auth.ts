@@ -118,19 +118,108 @@ async function verifyFirebaseIdToken(token: string): Promise<DecodedIdToken> {
       return await adminAuth.verifyIdToken(token);
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code;
-      const msg = err instanceof Error ? err.message : '';
-      if (
-        code === 'ERR_REQUIRE_ESM' ||
-        msg.includes('ERR_REQUIRE_ESM') ||
-        msg.includes('Cannot find module')
-      ) {
+      if (code === 'ERR_REQUIRE_ESM') {
         adminAuthDisabled = true;
       } else {
-        throw err;
+        // Re-throw genuine auth rejection errors (expired/invalid token)
+        const msg = err instanceof Error ? err.message : '';
+        if (!msg.includes('ERR_REQUIRE_ESM') && !msg.includes('Cannot find module')) {
+          throw err;
+        }
+        adminAuthDisabled = true;
       }
     }
   }
   return verifyTokenWithGoogleCerts(token);
+}
+
+const APP_TOKEN_PREFIX = 'uc_';
+const APP_TOKEN_TTL_SEC = 60 * 60 * 24 * 7;
+
+function getAppTokenSecret(): string {
+  if (process.env.AUTH_TOKEN_SECRET && process.env.AUTH_TOKEN_SECRET.trim()) {
+    return process.env.AUTH_TOKEN_SECRET.trim();
+  }
+  const dbSecret =
+    process.env.SQL_PASSWORD ||
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    '';
+  const seed = `${dbSecret}:${firebaseConfig.apiKey}:${firebaseConfig.projectId}:unicharge`;
+  return crypto.createHash('sha256').update(seed).digest('hex');
+}
+
+export function signAppToken(user: {
+  uid: string;
+  email: string;
+  name: string;
+}): string {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    sub: user.uid,
+    uid: user.uid,
+    email: user.email,
+    name: user.name,
+    iat: now,
+    exp: now + APP_TOKEN_TTL_SEC,
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', getAppTokenSecret())
+    .update(payloadB64)
+    .digest('base64url');
+  return `${APP_TOKEN_PREFIX}${payloadB64}.${sig}`;
+}
+
+function verifyAppToken(token: string): DecodedIdToken {
+  const raw = token.slice(APP_TOKEN_PREFIX.length);
+  const dotIdx = raw.indexOf('.');
+  if (dotIdx <= 0) {
+    throw new Error('Malformed session token');
+  }
+  const payloadB64 = raw.slice(0, dotIdx);
+  const sigB64 = raw.slice(dotIdx + 1);
+
+  const expectedSig = crypto
+    .createHmac('sha256', getAppTokenSecret())
+    .update(payloadB64)
+    .digest();
+  const actualSig = base64UrlToBuffer(sigB64);
+  if (
+    expectedSig.length !== actualSig.length ||
+    !crypto.timingSafeEqual(expectedSig, actualSig)
+  ) {
+    throw new Error('Invalid session token signature');
+  }
+
+  const payload = JSON.parse(base64UrlToBuffer(payloadB64).toString('utf8')) as {
+    uid?: string;
+    sub?: string;
+    email?: string;
+    name?: string;
+    iat?: number;
+    exp?: number;
+  };
+  const now = Math.floor(Date.now() / 1000);
+  if (!payload.uid || typeof payload.exp !== 'number' || payload.exp <= now) {
+    throw new Error('Session token expired');
+  }
+
+  return {
+    uid: payload.uid,
+    sub: payload.uid,
+    email: payload.email || '',
+    name: payload.name || '',
+    aud: firebaseConfig.projectId,
+    iss: 'unicharge-local-auth',
+    iat: payload.iat || now,
+    exp: payload.exp,
+    auth_time: payload.iat || now,
+    firebase: {
+      identities: {},
+      sign_in_provider: 'password',
+    },
+  } as DecodedIdToken;
 }
 
 export const requireAuth = async (
@@ -145,11 +234,13 @@ export const requireAuth = async (
 
   const token = authHeader.split('Bearer ')[1];
   try {
-    const decodedToken = await verifyFirebaseIdToken(token);
+    const decodedToken = token.startsWith(APP_TOKEN_PREFIX)
+      ? verifyAppToken(token)
+      : await verifyFirebaseIdToken(token);
     req.user = decodedToken;
     next();
   } catch (error) {
-    console.error('Error verifying Firebase ID token:', error);
+    console.error('Error verifying auth token:', error);
     return res.status(401).json({ error: 'Unauthorized: Invalid token' });
   }
 };

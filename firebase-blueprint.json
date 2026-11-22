@@ -1,0 +1,128 @@
+{
+  "entities": {
+    "Notification": {
+      "title": "Notification",
+      "description": "Real-time charging completion and locker door security alert delivered to the user dashboard via Firestore snapshots.",
+      "type": "object",
+      "properties": {
+        "userUid": {
+          "type": "string",
+          "description": "Firebase/UniCharge UID of the notification owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sessionId": {
+          "type": "string",
+          "description": "Associated charging or storage session ID.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "stationId": {
+          "type": "string",
+          "description": "Campus kiosk station ID.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "stationCode": {
+          "type": "string",
+          "description": "Campus kiosk hardware code.",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "stationName": {
+          "type": "string",
+          "description": "Human-readable station name.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "slotNumber": {
+          "type": "integer",
+          "description": "Compartment number (1-64)."
+        },
+        "type": {
+          "type": "string",
+          "description": "Alert event category.",
+          "enum": ["charge_complete", "unexpected_door_open"]
+        },
+        "severity": {
+          "type": "string",
+          "description": "Visual severity level for the dashboard notification.",
+          "enum": ["info", "critical"]
+        },
+        "title": {
+          "type": "string",
+          "description": "Short alert headline.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "message": {
+          "type": "string",
+          "description": "Detailed actionable alert text.",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "read": {
+          "type": "boolean",
+          "description": "Whether the user has acknowledged the notification."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the notification was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the notification was last updated."
+        }
+      },
+      "required": [
+        "userUid",
+        "sessionId",
+        "stationId",
+        "stationCode",
+        "stationName",
+        "slotNumber",
+        "type",
+        "severity",
+        "title",
+        "message",
+        "read",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminMarker": {
+      "title": "AdminMarker",
+      "description": "Marker document identifying verified UniCharge campus administrators.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        }
+      },
+      "required": ["uid"]
+    }
+  },
+  "firestore": {
+    "/notifications/{notificationId}": {
+      "schema": {
+        "$ref": "#/entities/Notification"
+      },
+      "description": "User-scoped real-time notifications for 100% battery completion and unexpected locker door openings."
+    },
+    "/admins/{adminId}": {
+      "schema": {
+        "$ref": "#/entities/AdminMarker"
+      },
+      "description": "Read-only admin role marker documents."
+    }
+  }
+}

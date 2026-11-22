@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import QRCode from 'qrcode';
 import { useUniCharge } from '../../context/UniChargeContext';
 import { sound } from '../../utils/audio';
 import { formatDuration } from '../../utils/format';
@@ -26,20 +27,15 @@ import {
   Bell,
   PhoneCall,
   Download,
-  Smartphone,
-  Columns,
   AlertTriangle,
   RotateCcw,
   ScanLine,
+  Mail,
+  Loader2,
   X,
 } from 'lucide-react';
 import { KioskHardwareSimulator } from '../hardware/KioskHardwareSimulator';
 import { QrMatrixSvg } from '../hardware/QrMatrixSvg';
-import { StationDiscoveryScreen } from '../screens/StationDiscoveryScreen';
-import { ServiceLockerSelectionScreen } from '../screens/ServiceLockerSelectionScreen';
-import { PaymentQrUnlockScreen } from '../screens/PaymentQrUnlockScreen';
-import { ActiveSessionScreen } from '../screens/ActiveSessionScreen';
-import { ProfileHistoryScreen } from '../screens/ProfileHistoryScreen';
 
 export type StudentSection =
   | 'dashboard'
@@ -47,7 +43,7 @@ export type StudentSection =
   | 'sessions'
   | 'wallet'
   | 'booking'
-  | 'mobile'
+  | 'kiosk'
   | 'settings'
   | 'support';
 
@@ -80,6 +76,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
     sessionHistory,
     generateUnlockToken,
     regenerateUnlockToken,
+    resendUnlockQrEmail,
     cancelPendingUnlock,
     endActiveSession,
     topUpWallet,
@@ -87,21 +84,24 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
     togglePushNotifications,
     toggleOverchargeProtection,
     triggerSimulatedTamper,
+    simulateFullCharge,
+    triggerUnexpectedDoorOpen,
     setHardwareKioskStationId,
+    notifications,
+    isFirestoreLive,
+    markNotificationRead,
   } = useUniCharge();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [stationFilter, setStationFilter] = useState<'all' | 'available' | 'nearest'>('all');
   const [paymentMethod, setPaymentMethod] = useState<'wallet' | 'gcash' | 'maya' | 'cash'>('wallet');
   const [bookingMessage, setBookingMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isGeneratingQr, setIsGeneratingQr] = useState(false);
+  const [isResendingQrEmail, setIsResendingQrEmail] = useState(false);
+  const [resendStatusMessage, setResendStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showQrModal, setShowQrModal] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [selectedReceipt, setSelectedReceipt] = useState<SessionHistoryItem | null>(null);
-  const [mobileSubTab, setMobileSubTab] = useState<'stations' | 'services' | 'active' | 'profile'>('stations');
-  const [mobilePaymentStep, setMobilePaymentStep] = useState(false);
-  const [mobileLayoutMode, setMobileLayoutMode] = useState<
-    'side-by-side' | 'mobile-only' | 'kiosk-only'
-  >('side-by-side');
 
   const formatTimer = (totalSecs: number) => {
     const m = Math.floor(totalSecs / 60);
@@ -135,13 +135,56 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
 
   const totalFee = calculateFee(selectedSize, selectedDuration, selectedService);
 
-  const handleConfirmUnlock = () => {
-    const res = generateUnlockToken(paymentMethod);
-    if (res.success) {
-      setBookingMessage({ type: 'success', text: res.message });
-      setShowQrModal(true);
-    } else {
-      setBookingMessage({ type: 'error', text: res.message });
+  const handleConfirmUnlock = async () => {
+    if (isGeneratingQr) return;
+    setIsGeneratingQr(true);
+    setResendStatusMessage(null);
+    try {
+      const res = await generateUnlockToken(paymentMethod);
+      if (res.success) {
+        setBookingMessage({ type: 'success', text: res.message });
+        setShowQrModal(true);
+      } else {
+        setBookingMessage({ type: 'error', text: res.message });
+      }
+    } finally {
+      setIsGeneratingQr(false);
+    }
+  };
+
+  const handleResendQrEmail = async () => {
+    if (isResendingQrEmail) return;
+    setIsResendingQrEmail(true);
+    setResendStatusMessage(null);
+    try {
+      const res = await resendUnlockQrEmail();
+      setResendStatusMessage({
+        type: res.success ? 'success' : 'error',
+        text: res.message,
+      });
+    } finally {
+      setIsResendingQrEmail(false);
+    }
+  };
+
+  const handleDownloadQrPng = async () => {
+    if (!pendingUnlockToken) return;
+    sound.playTap();
+    try {
+      const dataUrl = await QRCode.toDataURL(pendingUnlockToken.qrPayload, {
+        width: 400,
+        margin: 4,
+        errorCorrectionLevel: 'M',
+        color: { dark: '#1E293B', light: '#FFFFFF' },
+      });
+      const link = document.createElement('a');
+      link.href = dataUrl;
+      link.download = `unicharge-${pendingUnlockToken.stationCode.toLowerCase()}-slot-${pendingUnlockToken.slotNumber}.png`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err) {
+      console.error('Failed to generate downloadable QR PNG:', err);
     }
   };
 
@@ -160,19 +203,21 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               Welcome back, <span className="text-[#4E6E81]">{student.name.split(' ')[0]}</span>
             </h1>
             <p className="text-sm text-[#64748B] mt-0.5">
-              {student.college} · Student ID <span className="font-mono text-[#1E293B]">{student.studentIdNumber}</span>
+              {student.college}
+              {student.degree ? ` · ${student.degree}` : ''} · Student ID{' '}
+              <span className="font-mono text-[#1E293B]">{student.studentIdNumber}</span>
             </p>
           </div>
           <div className="flex items-center gap-2.5">
             <button
               onClick={() => {
                 sound.playTap();
-                onChangeSection('mobile');
+                onChangeSection('kiosk');
               }}
               className="px-3.5 py-2 rounded-xl border border-[#E2E8F0] bg-[#FFFFFF] text-xs font-semibold text-[#1E293B] hover:bg-[#EDF2F5] flex items-center gap-2 cursor-pointer transition-colors"
             >
-              <Smartphone className="w-4 h-4 text-[#4E6E81]" />
-              <span>Expo Mobile &amp; Kiosk View</span>
+              <ScanLine className="w-4 h-4 text-[#4E6E81]" />
+              <span>Kiosk Scanner</span>
             </button>
             <button
               onClick={() => startBookingForStation(selectedStation)}
@@ -183,6 +228,83 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Real-Time Firestore Snapshot Dashboard Alerts */}
+        {notifications.filter((n) => !n.read).length > 0 && (
+          <div className="space-y-2.5">
+            {notifications
+              .filter((n) => !n.read)
+              .slice(0, 3)
+              .map((notif) => {
+                const isCritical = notif.type === 'unexpected_door_open';
+                return (
+                  <div
+                    key={notif.id}
+                    role="alert"
+                    className={`rounded-2xl border p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs ${
+                      isCritical
+                        ? 'bg-red-50 border-[#DC2626] text-[#1E293B]'
+                        : 'bg-[#EBF9F3] border-[#5BC496] text-[#1E293B]'
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div
+                        className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                          isCritical ? 'bg-white text-[#DC2626]' : 'bg-white text-[#5BC496]'
+                        }`}
+                      >
+                        {isCritical ? (
+                          <AlertTriangle className="w-5 h-5" />
+                        ) : (
+                          <BatteryCharging className="w-5 h-5" />
+                        )}
+                      </div>
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-bold text-[#1E293B]">
+                            {notif.title}
+                          </span>
+                          <span
+                            className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                              isCritical
+                                ? 'bg-[#DC2626] text-white'
+                                : 'bg-[#5BC496] text-[#1E293B]'
+                            }`}
+                          >
+                            {isFirestoreLive ? 'Firestore Live' : 'Live Alert'}
+                          </span>
+                        </div>
+                        <p className="text-xs text-[#334155] mt-0.5">{notif.message}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void markNotificationRead(notif.id);
+                          onChangeSection(isCritical ? 'kiosk' : 'sessions');
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${
+                          isCritical
+                            ? 'bg-[#DC2626] text-white hover:bg-red-700'
+                            : 'bg-[#4E6E81] text-white hover:bg-[#3D5767]'
+                        }`}
+                      >
+                        {isCritical ? 'Inspect Kiosk' : 'Retrieve Device'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void markNotificationRead(notif.id)}
+                        className="px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E8F0] text-xs font-semibold text-[#64748B] hover:text-[#1E293B] cursor-pointer"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+        )}
 
         {/* KPI Strip */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -287,12 +409,31 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   </div>
                 </div>
 
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button
                     onClick={() => onChangeSection('sessions')}
                     className="flex-1 h-10 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#4E6E81] hover:bg-[#EDF2F5] cursor-pointer transition-colors"
                   >
                     Open Full Telemetry
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void simulateFullCharge()}
+                    className="h-10 px-3 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/50 text-[11px] font-bold text-[#1E293B] hover:bg-[#5BC496]/20 cursor-pointer transition-colors"
+                  >
+                    Simulate 100%
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void triggerUnexpectedDoorOpen(
+                        activeSession.stationId,
+                        activeSession.slotNumber
+                      )
+                    }
+                    className="h-10 px-3 rounded-xl bg-red-50 border border-red-200 text-[11px] font-bold text-[#DC2626] hover:bg-red-100 cursor-pointer transition-colors"
+                  >
+                    Test Door Open
                   </button>
                   <button
                     onClick={() => setShowEndConfirm(true)}
@@ -368,8 +509,8 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
 
         {/* Unlock Confirmation Modal */}
         {showEndConfirm && activeSession && (
-          <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
-            <div className="w-full max-w-sm bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 shadow-xl">
+          <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+            <div className="w-full max-w-sm my-auto max-h-[calc(100dvh-2rem)] overflow-y-auto bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 shadow-xl">
               <h3 className="text-base font-bold text-[#1E293B]">
                 Unlock Compartment #{activeSession.slotNumber}?
               </h3>
@@ -598,7 +739,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                 <span className="text-xs text-[#64748B]">
                   PIN <strong className="font-mono text-[#1E293B]">{pendingUnlockToken.pinCode}</strong> ·{' '}
                   <strong className="font-mono text-[#4E6E81]">
-                    {pendingSecondsLeft > 0 ? `${pendingSecondsLeft}s remaining` : 'Expired'}
+                    {pendingSecondsLeft > 0 ? `${formatTimer(pendingSecondsLeft)} remaining` : 'Expired'}
                   </strong>
                 </span>
               </div>
@@ -611,7 +752,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                 Show Unlock QR
               </button>
               <button
-                onClick={() => onChangeSection('mobile')}
+                onClick={() => onChangeSection('kiosk')}
                 className="px-3 py-1.5 rounded-lg bg-[#5BC496] text-[#1E293B] text-xs font-bold hover:bg-[#48AD80] cursor-pointer"
               >
                 Open Kiosk Scanner
@@ -815,14 +956,23 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
             </div>
 
             <button
-              onClick={handleConfirmUnlock}
-              className="w-full h-11 rounded-xl bg-[#4E6E81] text-white font-semibold text-xs flex items-center justify-center gap-2 hover:bg-[#3D5767] cursor-pointer shadow-sm transition-colors"
+              onClick={() => void handleConfirmUnlock()}
+              disabled={isGeneratingQr}
+              className="w-full h-11 rounded-xl bg-[#4E6E81] text-white font-semibold text-xs flex items-center justify-center gap-2 hover:bg-[#3D5767] disabled:opacity-60 cursor-pointer shadow-sm transition-colors"
             >
-              <QrCode className="w-4 h-4 text-[#5BC496]" />
-              <span>Authorize &amp; Generate Unlock QR (₱{totalFee})</span>
+              {isGeneratingQr ? (
+                <Loader2 className="w-4 h-4 text-[#5BC496] animate-spin" />
+              ) : (
+                <QrCode className="w-4 h-4 text-[#5BC496]" />
+              )}
+              <span>
+                {isGeneratingQr
+                  ? 'Generating & Emailing QR Pass...'
+                  : `Authorize & Generate Unlock QR (₱${totalFee})`}
+              </span>
             </button>
             <p className="text-[11px] text-[#64748B] text-center leading-relaxed">
-              Generates a time-sensitive 60s QR code &amp; PIN. Solenoid unlatches only when scanned at the physical kiosk.
+              Generates a 5-minute single-use QR pass &amp; backup PIN and emails a scannable QR copy to {student.email}.
             </p>
           </div>
         </div>
@@ -894,7 +1044,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-3 pt-4 border-t border-[#E2E8F0]">
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2.5">
                 <button
                   onClick={toggleOverchargeProtection}
                   className="px-3.5 py-2 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#1E293B] hover:bg-[#EDF2F5] flex items-center gap-2 cursor-pointer"
@@ -905,11 +1055,19 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   </span>
                 </button>
                 <button
-                  onClick={triggerSimulatedTamper}
-                  className="px-3.5 py-2 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#1E293B] hover:bg-[#EDF2F5] flex items-center gap-2 cursor-pointer"
+                  type="button"
+                  onClick={() => void simulateFullCharge()}
+                  className="px-3.5 py-2 rounded-xl border border-[#5BC496]/50 bg-[#EBF9F3] text-xs font-semibold text-[#1E293B] hover:bg-[#5BC496]/20 flex items-center gap-2 cursor-pointer"
                 >
-                  <ShieldCheck className="w-3.5 h-3.5 text-[#5BC496]" />
-                  <span>Test Tamper Accelerometer</span>
+                  <BatteryCharging className="w-3.5 h-3.5 text-[#5BC496]" />
+                  <span>Simulate 100% Charge</span>
+                </button>
+                <button
+                  onClick={triggerSimulatedTamper}
+                  className="px-3.5 py-2 rounded-xl border border-red-200 bg-red-50 text-xs font-semibold text-[#DC2626] hover:bg-red-100 flex items-center gap-2 cursor-pointer"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-[#DC2626]" />
+                  <span>Simulate Unexpected Door Open</span>
                 </button>
               </div>
             </div>
@@ -973,8 +1131,8 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
 
         {/* Receipt Modal */}
         {selectedReceipt && (
-          <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
-            <div className="w-full max-w-sm bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 shadow-xl space-y-4">
+          <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+            <div className="w-full max-w-sm my-auto max-h-[calc(100dvh-2rem)] overflow-y-auto bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 shadow-xl space-y-4">
               <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-3">
                 <div>
                   <span className="text-[11px] font-semibold text-[#4E6E81] uppercase">Official E-Receipt</span>
@@ -1006,8 +1164,8 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
 
         {/* End Session Confirm */}
         {showEndConfirm && activeSession && (
-          <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
-            <div className="w-full max-w-sm bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 shadow-xl">
+          <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+            <div className="w-full max-w-sm my-auto max-h-[calc(100dvh-2rem)] overflow-y-auto bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 shadow-xl">
               <h3 className="text-base font-bold text-[#1E293B]">
                 Unlock Compartment #{activeSession.slotNumber}?
               </h3>
@@ -1093,55 +1251,20 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
     );
   }
 
-  // 6. INTERACTIVE MOBILE + HARDWARE KIOSK VIEW
-  if (section === 'mobile') {
-    const showPhone = mobileLayoutMode === 'side-by-side' || mobileLayoutMode === 'mobile-only';
-    const showKiosk = mobileLayoutMode === 'side-by-side' || mobileLayoutMode === 'kiosk-only';
-
+  // 6. PHYSICAL KIOSK QR SCANNER & HARDWARE TERMINAL
+  if (section === 'kiosk') {
     return (
       <div className="space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-          <div>
-            <h1 className="text-xl font-bold text-[#4E6E81] tracking-tight">
-              Mobile Companion &amp; Hardware Kiosk
-            </h1>
-            <p className="text-xs text-[#64748B]">
-              Side-by-side workspace linking the UniCharge mobile companion with the 8-door ESP32-S3 kiosk simulator.
-            </p>
-          </div>
-
-          {/* Responsive Layout Mode Switch */}
-          <div className="flex flex-wrap bg-[#FFFFFF] border border-[#E2E8F0] rounded-xl p-1 text-xs gap-1">
-            {(
-              [
-                { id: 'side-by-side', label: 'Side-by-Side (Phone + Kiosk)', icon: Columns },
-                { id: 'mobile-only', label: 'Mobile Only', icon: Smartphone },
-                { id: 'kiosk-only', label: 'Kiosk Only', icon: ScanLine },
-              ] as const
-            ).map((mode) => {
-              const ModeIcon = mode.icon;
-              return (
-                <button
-                  key={mode.id}
-                  onClick={() => {
-                    sound.playTap();
-                    setMobileLayoutMode(mode.id);
-                  }}
-                  className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 cursor-pointer transition-colors ${
-                    mobileLayoutMode === mode.id
-                      ? 'bg-[#4E6E81] text-white'
-                      : 'text-[#64748B] hover:text-[#1E293B]'
-                  }`}
-                >
-                  <ModeIcon className="w-3.5 h-3.5" />
-                  <span>{mode.label}</span>
-                </button>
-              );
-            })}
-          </div>
+        <div>
+          <h1 className="text-xl font-bold text-[#4E6E81] tracking-tight">
+            Kiosk QR Scanner &amp; Hardware Terminal
+          </h1>
+          <p className="text-xs text-[#64748B]">
+            Tap Scan QR on the 8-door station touchscreen to open your camera, upload your QR PNG, or enter your 6-digit backup PIN to unlock a compartment.
+          </p>
         </div>
 
-        {/* Active Pending QR Banner inside Mobile & Expo for easy physical kiosk scanning */}
+        {/* Active Pending QR Banner for quick physical kiosk scanning */}
         {pendingUnlockToken && (
           <div className="p-4 rounded-2xl bg-[#FFFFFF] border-2 border-[#5BC496] flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
             <div className="flex items-start gap-3">
@@ -1153,8 +1276,8 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   Active Unlock QR Ready for Kiosk Scan · {pendingUnlockToken.stationName} Slot #{pendingUnlockToken.slotNumber}
                 </span>
                 <span className="text-xs text-[#64748B]">
-                  Tap <strong className="text-[#4E6E81]">&ldquo;Scan QR&rdquo;</strong> on the kiosk touchscreen below, or enter PIN{' '}
-                  <strong className="font-mono text-[#1E293B]">{pendingUnlockToken.pinCode}</strong> ({pendingSecondsLeft}s left).
+                  Tap <strong className="text-[#4E6E81]">&ldquo;Scan QR&rdquo;</strong> on the kiosk touchscreen below, hold your emailed QR pass to the camera, or enter PIN{' '}
+                  <strong className="font-mono text-[#1E293B]">{pendingUnlockToken.pinCode}</strong> ({formatTimer(pendingSecondsLeft)} left).
                 </span>
               </div>
             </div>
@@ -1175,75 +1298,8 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
           </div>
         )}
 
-        {/* Spacious Responsive Workspace */}
-        <div
-          className={`flex flex-col ${
-            mobileLayoutMode === 'side-by-side' ? 'xl:flex-row' : ''
-          } gap-6 items-stretch`}
-        >
-          {showPhone && (
-            <div className="flex justify-center shrink-0">
-              <div className="relative w-[360px] h-[720px] bg-[#3D5767] rounded-[46px] p-3 shadow-xl border-[5px] border-[#4E6E81] flex flex-col">
-                <div className="flex-1 w-full rounded-[38px] overflow-hidden bg-[#F8FAFC] flex flex-col relative">
-                  <div className="flex-1 overflow-hidden relative">
-                    {mobileSubTab === 'stations' && (
-                      <StationDiscoveryScreen
-                        onSelectStationToBook={(st) => {
-                          setSelectedStation(st);
-                          setMobilePaymentStep(false);
-                          setMobileSubTab('services');
-                        }}
-                      />
-                    )}
-                    {mobileSubTab === 'services' &&
-                      (mobilePaymentStep ? (
-                        <PaymentQrUnlockScreen
-                          onUnlockSuccess={() => {
-                            setMobilePaymentStep(false);
-                            setMobileSubTab('active');
-                          }}
-                          onBackToConfig={() => setMobilePaymentStep(false)}
-                        />
-                      ) : (
-                        <ServiceLockerSelectionScreen
-                          onProceedToPayment={() => setMobilePaymentStep(true)}
-                          onBackToStations={() => setMobileSubTab('stations')}
-                        />
-                      ))}
-                    {mobileSubTab === 'active' && (
-                      <ActiveSessionScreen onStartNewSession={() => setMobileSubTab('stations')} />
-                    )}
-                    {mobileSubTab === 'profile' && <ProfileHistoryScreen />}
-                  </div>
-                  <nav className="bg-[#FFFFFF] border-t border-[#E2E8F0] grid grid-cols-4 h-14 text-[11px] shrink-0">
-                    {(['stations', 'services', 'active', 'profile'] as const).map((t) => (
-                      <button
-                        key={t}
-                        onClick={() => {
-                          sound.playTap();
-                          setMobilePaymentStep(false);
-                          setMobileSubTab(t);
-                        }}
-                        className={`capitalize font-semibold cursor-pointer transition-colors ${
-                          mobileSubTab === t
-                            ? 'text-[#4E6E81] bg-[#EDF2F5]/70 font-bold border-t-2 border-t-[#5BC496]'
-                            : 'text-[#64748B] hover:text-[#1E293B]'
-                        }`}
-                      >
-                        {t}
-                      </button>
-                    ))}
-                  </nav>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {showKiosk && (
-            <div className="flex-1 min-w-0 min-h-[720px] rounded-2xl border border-[#E2E8F0] overflow-hidden bg-[#F8FAFC] shadow-sm">
-              <KioskHardwareSimulator />
-            </div>
-          )}
+        <div className="w-full min-h-[720px] rounded-2xl border border-[#E2E8F0] overflow-hidden bg-[#F8FAFC] shadow-sm">
+          <KioskHardwareSimulator />
         </div>
       </div>
     );
@@ -1335,50 +1391,114 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
 
       {/* QR CODE VERIFICATION MODAL */}
       {showQrModal && pendingUnlockToken && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] border-t-4 border-t-[#4E6E81] shadow-2xl p-6 space-y-4">
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-start sm:items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="w-full max-w-md my-auto max-h-[calc(100dvh-1.5rem)] overflow-y-auto bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] border-t-4 border-t-[#4E6E81] shadow-2xl p-4 sm:p-5 space-y-3">
             <div className="flex items-start justify-between gap-3">
-              <div>
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[#5BC496]">
+              <div className="min-w-0">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[#5BC496] block">
                   Physical Kiosk Authorization
                 </span>
-                <h3 className="text-lg font-bold text-[#1E293B]">
+                <h3 className="text-base sm:text-lg font-bold text-[#1E293B] leading-snug">
                   Scan QR at {pendingUnlockToken.stationName}
                 </h3>
               </div>
               <button
                 onClick={() => setShowQrModal(false)}
                 aria-label="Close QR modal"
-                className="w-8 h-8 rounded-lg flex items-center justify-center text-[#64748B] hover:bg-[#EDF2F5] cursor-pointer"
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-[#64748B] hover:bg-[#EDF2F5] cursor-pointer shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             {/* Instructional Banner */}
-            <div className="p-3.5 rounded-xl bg-[#EDF2F5] border border-[#4E6E81]/20 text-xs text-[#1E293B] leading-relaxed">
+            <div className="p-3 rounded-xl bg-[#EDF2F5] border border-[#4E6E81]/20 text-xs text-[#1E293B] leading-relaxed">
               Walk up to the <strong>{pendingUnlockToken.stationName}</strong> Kiosk, tap{' '}
-              <strong>&lsquo;Scan QR&rsquo;</strong> on the touchscreen, and hold this QR code to the kiosk scanner to securely release{' '}
+              <strong>&lsquo;Scan QR&rsquo;</strong> on the touchscreen, and hold this QR code (or the PNG from your email) to the kiosk camera to release{' '}
               <strong>Compartment #{pendingUnlockToken.slotNumber}</strong>.
             </div>
 
+            {/* Email Delivery Status */}
+            {pendingUnlockToken.emailSent ? (
+              <div className="p-2.5 sm:p-3 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/40 text-xs text-[#1E293B] flex items-start justify-between gap-2">
+                <div className="flex items-start gap-2 min-w-0">
+                  <Mail className="w-4 h-4 text-[#5BC496] shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <span className="font-semibold block break-words">
+                      QR pass emailed to {pendingUnlockToken.emailSentTo || student.email}
+                    </span>
+                    <span className="text-[11px] text-[#64748B] block break-words">
+                      {pendingUnlockToken.emailSentFrom
+                        ? `From ${pendingUnlockToken.emailSentFrom} · Check Inbox, Spam, or search "UniCharge".`
+                        : 'Check Inbox, Updates, or Spam if it doesn\u2019t appear right away.'}
+                    </span>
+                    {pendingUnlockToken.emailPreviewUrl && (
+                      <a
+                        href={pendingUnlockToken.emailPreviewUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[11px] font-semibold text-[#4E6E81] underline"
+                      >
+                        Open test email preview
+                      </a>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={isResendingQrEmail}
+                  onClick={() => void handleResendQrEmail()}
+                  className="text-[11px] font-bold text-[#4E6E81] hover:text-[#1E293B] underline shrink-0 cursor-pointer disabled:opacity-50"
+                >
+                  {isResendingQrEmail ? 'Sending...' : 'Resend'}
+                </button>
+              </div>
+            ) : (
+              <div className="p-2.5 sm:p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-center justify-between gap-2">
+                <span className="flex-1">
+                  {pendingUnlockToken.emailError ||
+                    `Want a copy in your inbox? Send this scannable QR pass to ${student.email}.`}
+                </span>
+                <button
+                  type="button"
+                  disabled={isResendingQrEmail}
+                  onClick={() => void handleResendQrEmail()}
+                  className="px-2.5 py-1 rounded-lg bg-[#4E6E81] text-white text-[11px] font-bold shrink-0 cursor-pointer hover:bg-[#3D5767] disabled:opacity-50"
+                >
+                  {isResendingQrEmail ? 'Sending...' : 'Email QR Pass'}
+                </button>
+              </div>
+            )}
+
+            {resendStatusMessage && (
+              <div
+                className={`p-2.5 rounded-lg text-[11px] font-medium ${
+                  resendStatusMessage.type === 'success'
+                    ? 'bg-[#EBF9F3] text-[#1E293B] border border-[#5BC496]/30'
+                    : 'bg-red-50 text-[#DC2626] border border-red-200'
+                }`}
+              >
+                {resendStatusMessage.text}
+              </div>
+            )}
+
             {/* QR Matrix + 6-Digit PIN */}
-            <div className="flex flex-col items-center justify-center p-5 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0]">
-              <div className="p-3 bg-white rounded-2xl border border-[#E2E8F0] shadow-xs">
+            <div className="flex flex-col items-center justify-center p-3.5 sm:p-4 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0]">
+              <div className="p-2 bg-white rounded-2xl border border-[#E2E8F0] shadow-xs">
                 <QrMatrixSvg
                   value={pendingUnlockToken.qrPayload}
-                  size={172}
+                  size={136}
                   foreground="#1E293B"
                   accent="#5BC496"
                 />
               </div>
 
-              <div className="mt-4 flex items-center gap-4 text-center">
+              <div className="mt-3 flex items-center gap-4 text-center">
                 <div>
                   <span className="text-[10px] font-bold uppercase tracking-wider text-[#64748B] block">
                     6-Digit Backup PIN
                   </span>
-                  <span className="text-xl font-bold font-mono tracking-[0.2em] text-[#4E6E81]">
+                  <span className="text-lg sm:text-xl font-bold font-mono tracking-[0.2em] text-[#4E6E81]">
                     {pendingUnlockToken.pinCode}
                   </span>
                 </div>
@@ -1388,49 +1508,58 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                     Expires In
                   </span>
                   <span
-                    className={`text-xl font-bold font-mono flex items-center gap-1 ${
+                    className={`text-lg sm:text-xl font-bold font-mono flex items-center gap-1 ${
                       pendingSecondsLeft === 0
                         ? 'text-[#DC2626]'
-                        : pendingSecondsLeft <= 15
+                        : pendingSecondsLeft <= 30
                         ? 'text-[#F59E0B]'
                         : 'text-[#5BC496]'
                     }`}
                   >
                     <Clock className="w-4 h-4" />
-                    {pendingSecondsLeft}s
+                    {formatTimer(pendingSecondsLeft)}
                   </span>
                 </div>
               </div>
+
+              <button
+                type="button"
+                onClick={() => void handleDownloadQrPng()}
+                className="mt-2.5 px-3 py-1.5 rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#EDF2F5] text-[11px] font-semibold text-[#4E6E81] inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 text-[#5BC496]" />
+                <span>Download QR PNG</span>
+              </button>
             </div>
 
             {pendingSecondsLeft === 0 && (
               <button
-                onClick={regenerateUnlockToken}
+                onClick={() => void regenerateUnlockToken()}
                 className="w-full h-10 rounded-xl bg-[#F59E0B] text-white text-xs font-bold flex items-center justify-center gap-2 hover:bg-amber-600 cursor-pointer"
               >
                 <RotateCcw className="w-4 h-4" />
-                <span>QR Expired — Regenerate 60s Unlock Token</span>
+                <span>QR Expired — Regenerate 5-Minute Unlock Token</span>
               </button>
             )}
 
-            <div className="flex flex-col sm:flex-row gap-2.5 pt-1">
+            <div className="flex flex-col sm:flex-row gap-2 pt-0.5">
               <button
                 onClick={() => {
                   sound.playTap();
                   setShowQrModal(false);
-                  onChangeSection('mobile');
+                  onChangeSection('kiosk');
                 }}
-                className="flex-1 h-11 rounded-xl bg-[#5BC496] hover:bg-[#48AD80] text-[#1E293B] font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                className="flex-1 h-10 rounded-xl bg-[#5BC496] hover:bg-[#48AD80] text-[#1E293B] font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors"
               >
                 <ScanLine className="w-4 h-4" />
-                <span>Go to Kiosk Scanner (Mobile &amp; Expo)</span>
+                <span>Go to Kiosk Scanner</span>
               </button>
               <button
                 onClick={() => {
                   cancelPendingUnlock();
                   setShowQrModal(false);
                 }}
-                className="h-11 px-4 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#64748B] hover:text-[#DC2626] hover:bg-red-50 cursor-pointer transition-colors"
+                className="h-10 px-4 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#64748B] hover:text-[#DC2626] hover:bg-red-50 cursor-pointer transition-colors"
               >
                 Cancel
               </button>

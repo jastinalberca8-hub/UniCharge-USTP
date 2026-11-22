@@ -1,5 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useUniCharge } from '../../context/UniChargeContext';
+import {
+  ALLOWED_USTP_COLLEGE_VALUES,
+  USTP_COLLEGES,
+  getCoursesForCollege,
+  isCourseValidForCollege,
+} from '../../constants/colleges';
 import { sound } from '../../utils/audio';
 import { UniChargeLogo } from '../brand/UniChargeLogo';
 import {
@@ -8,10 +14,16 @@ import {
   Eye,
   EyeOff,
   ArrowRight,
+  ArrowLeft,
   AlertCircle,
   CheckCircle2,
   Building2,
+  ShieldCheck,
+  RefreshCw,
 } from 'lucide-react';
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const STUDENT_ID_REGEX = /^[A-Za-z0-9-]{4,24}$/;
 
 export const UnifiedAuthPage: React.FC = () => {
   const {
@@ -19,7 +31,10 @@ export const UnifiedAuthPage: React.FC = () => {
     navigate,
     loginWithAccount,
     loginWithGoogle,
+    sendSignupVerificationCode,
     registerStudentAccount,
+    sendPasswordResetCode,
+    resetPasswordWithCode,
     authSuccessMessage,
     clearAuthSuccess,
   } = useUniCharge();
@@ -30,24 +45,52 @@ export const UnifiedAuthPage: React.FC = () => {
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [showForgotModal, setShowForgotModal] = useState(false);
-  const [forgotEmail, setForgotEmail] = useState('');
-  const [forgotSent, setForgotSent] = useState(false);
+  const [forgotIdentifier, setForgotIdentifier] = useState('');
+  const [forgotStep, setForgotStep] = useState<'request' | 'verify'>('request');
+  const [forgotMaskedEmail, setForgotMaskedEmail] = useState('');
+  const [forgotCode, setForgotCode] = useState('');
+  const [forgotNewPassword, setForgotNewPassword] = useState('');
+  const [forgotConfirmPassword, setForgotConfirmPassword] = useState('');
+  const [showForgotNewPassword, setShowForgotNewPassword] = useState(false);
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [forgotError, setForgotError] = useState<string | null>(null);
+  const [forgotPreviewUrl, setForgotPreviewUrl] = useState<string | null>(null);
+  const [forgotCooldown, setForgotCooldown] = useState(0);
 
   // Signup form state
   const [fullName, setFullName] = useState('');
   const [studentId, setStudentId] = useState('');
   const [signupEmail, setSignupEmail] = useState('');
-  const [college, setCollege] = useState('College of Information Technology and Computing (CITC)');
+  const [college, setCollege] = useState('');
+  const [course, setCourse] = useState('');
   const [signupPassword, setSignupPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [signupStep, setSignupStep] = useState<'details' | 'verify'>('details');
+  const availableCourses = getCoursesForCollege(college);
+  const [verificationCode, setVerificationCode] = useState('');
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const [emailPreviewUrl, setEmailPreviewUrl] = useState<string | null>(null);
+  const [verificationBanner, setVerificationBanner] = useState<string | null>(null);
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (resendCooldown <= 0 && forgotCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setResendCooldown((prev) => Math.max(0, prev - 1));
+      setForgotCooldown((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [resendCooldown, forgotCooldown]);
+
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorBanner(null);
-    const result = loginWithAccount(identifier, password);
+    setAuthLoading(true);
+    const result = await loginWithAccount(identifier, password);
+    setAuthLoading(false);
     if (!result.success) {
       setErrorBanner(result.error || 'Invalid email/ID or password');
     }
@@ -63,12 +106,43 @@ export const UnifiedAuthPage: React.FC = () => {
     }
   };
 
-  const handleSignUpSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const triggerSendVerification = async () => {
     setErrorBanner(null);
+    setVerificationBanner(null);
 
-    if (signupPassword !== confirmPassword) {
-      setErrorBanner('Passwords do not match.');
+    const cleanName = fullName.trim();
+    const cleanId = studentId.trim();
+    const cleanEmail = signupEmail.trim().toLowerCase();
+
+    if (cleanName.length < 2) {
+      setErrorBanner('Please enter your full name (at least 2 characters).');
+      return;
+    }
+
+    if (!STUDENT_ID_REGEX.test(cleanId)) {
+      setErrorBanner(
+        'Enter a valid Student ID (4–24 letters, numbers, or hyphens, e.g. 2024-30512).'
+      );
+      return;
+    }
+
+    if (!college || !ALLOWED_USTP_COLLEGE_VALUES.has(college)) {
+      setErrorBanner('Please select your College from the dropdown menu.');
+      return;
+    }
+
+    if (!course) {
+      setErrorBanner('Please select your Course / Program from the dropdown menu.');
+      return;
+    }
+
+    if (!isCourseValidForCollege(college, course)) {
+      setErrorBanner('Selected course does not belong to the chosen college.');
+      return;
+    }
+
+    if (!EMAIL_REGEX.test(cleanEmail)) {
+      setErrorBanner('Please enter a valid USTP or personal email address.');
       return;
     }
 
@@ -77,29 +151,172 @@ export const UnifiedAuthPage: React.FC = () => {
       return;
     }
 
-    const res = registerStudentAccount({
-      name: fullName,
-      studentIdNumber: studentId,
-      email: signupEmail,
+    if (signupPassword !== confirmPassword) {
+      setErrorBanner('Passwords do not match.');
+      return;
+    }
+
+    setAuthLoading(true);
+    const sendRes = await sendSignupVerificationCode({
+      name: cleanName,
+      studentIdNumber: cleanId,
+      email: cleanEmail,
       password: signupPassword,
       college,
+      course,
     });
+    setAuthLoading(false);
+
+    if (!sendRes.success) {
+      setErrorBanner(sendRes.error || 'Unable to send verification code.');
+      return;
+    }
+
+    const safePreviewUrl =
+      sendRes.previewUrl &&
+      (sendRes.previewUrl.startsWith('https://') ||
+        sendRes.previewUrl.startsWith('http://'))
+        ? sendRes.previewUrl
+        : null;
+
+    setEmailPreviewUrl(safePreviewUrl);
+    setVerificationCode('');
+    setResendCooldown(30);
+    setSignupStep('verify');
+    setVerificationBanner(
+      `A 6-digit verification code has been sent to ${sendRes.email || cleanEmail}.`
+    );
+  };
+
+  const handleSignUpSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await triggerSendVerification();
+  };
+
+  const handleVerifyAndComplete = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorBanner(null);
+
+    if (!college || !ALLOWED_USTP_COLLEGE_VALUES.has(college)) {
+      setErrorBanner('Please select your College from the dropdown menu.');
+      return;
+    }
+
+    if (!course || !isCourseValidForCollege(college, course)) {
+      setErrorBanner('Selected course does not belong to the chosen college.');
+      return;
+    }
+
+    const cleanCode = verificationCode.trim();
+    if (!/^\d{6}$/.test(cleanCode)) {
+      setErrorBanner('Please enter the 6-digit verification code from your email.');
+      return;
+    }
+
+    setAuthLoading(true);
+    const res = await registerStudentAccount({
+      name: fullName.trim(),
+      studentIdNumber: studentId.trim(),
+      email: signupEmail.trim().toLowerCase(),
+      password: signupPassword,
+      college,
+      course,
+      verificationCode: cleanCode,
+    });
+    setAuthLoading(false);
 
     if (!res.success) {
-      setErrorBanner(res.error || 'Unable to create account.');
+      setErrorBanner(res.error || 'Unable to verify code and complete registration.');
     } else {
       setFullName('');
       setStudentId('');
       setSignupEmail('');
+      setCollege('');
+      setCourse('');
       setSignupPassword('');
       setConfirmPassword('');
+      setVerificationCode('');
+      setEmailPreviewUrl(null);
+      setVerificationBanner(null);
+      setSignupStep('details');
     }
   };
 
-  const handleForgotSubmit = (e: React.FormEvent) => {
+  const triggerSendPasswordReset = async () => {
+    setForgotError(null);
+    const cleanIdentifier = forgotIdentifier.trim();
+    if (!cleanIdentifier) {
+      setForgotError('Please enter your registered USTP/personal email or USTP Student ID.');
+      return;
+    }
+
+    setForgotLoading(true);
+    const res = await sendPasswordResetCode(cleanIdentifier);
+    setForgotLoading(false);
+
+    if (!res.success) {
+      setForgotError(res.error || 'Unable to send password reset code.');
+      return;
+    }
+
+    const safePreviewUrl =
+      res.previewUrl &&
+      (res.previewUrl.startsWith('https://') || res.previewUrl.startsWith('http://'))
+        ? res.previewUrl
+        : null;
+
+    setForgotMaskedEmail(res.maskedEmail || cleanIdentifier);
+    setForgotPreviewUrl(safePreviewUrl);
+    setForgotCode('');
+    setForgotCooldown(30);
+    setForgotStep('verify');
+  };
+
+  const handleForgotRequestSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    sound.playTap();
-    setForgotSent(true);
+    await triggerSendPasswordReset();
+  };
+
+  const handleForgotResetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setForgotError(null);
+
+    const cleanCode = forgotCode.trim();
+    if (!/^\d{6}$/.test(cleanCode)) {
+      setForgotError('Please enter the 6-digit password reset code from your email.');
+      return;
+    }
+    if (forgotNewPassword.length < 6) {
+      setForgotError('New password must be at least 6 characters.');
+      return;
+    }
+    if (forgotNewPassword !== forgotConfirmPassword) {
+      setForgotError('Passwords do not match.');
+      return;
+    }
+
+    setForgotLoading(true);
+    const res = await resetPasswordWithCode({
+      identifier: forgotIdentifier.trim(),
+      verificationCode: cleanCode,
+      newPassword: forgotNewPassword,
+    });
+    setForgotLoading(false);
+
+    if (!res.success) {
+      setForgotError(res.error || 'Unable to reset password.');
+      return;
+    }
+
+    setIdentifier(forgotIdentifier.trim());
+    setPassword('');
+    setErrorBanner(null);
+    setForgotCode('');
+    setForgotNewPassword('');
+    setForgotConfirmPassword('');
+    setForgotPreviewUrl(null);
+    setForgotStep('request');
+    setShowForgotModal(false);
   };
 
   return (
@@ -187,8 +404,13 @@ export const UnifiedAuthPage: React.FC = () => {
                       type="button"
                       onClick={() => {
                         sound.playTap();
-                        setForgotSent(false);
-                        setForgotEmail(identifier.includes('@') ? identifier : '');
+                        setForgotStep('request');
+                        setForgotError(null);
+                        setForgotCode('');
+                        setForgotNewPassword('');
+                        setForgotConfirmPassword('');
+                        setForgotPreviewUrl(null);
+                        setForgotIdentifier(identifier.trim());
                         setShowForgotModal(true);
                       }}
                       className="text-xs font-medium text-[#4E6E81] hover:text-[#5BC496] transition-colors cursor-pointer"
@@ -220,9 +442,10 @@ export const UnifiedAuthPage: React.FC = () => {
 
                 <button
                   type="submit"
-                  className="group w-full h-11 rounded-xl bg-[#4E6E81] text-white font-semibold text-sm flex items-center justify-center gap-2 hover:bg-[#3D5767] active:scale-[0.99] transition-all cursor-pointer shadow-sm mt-2"
+                  disabled={authLoading}
+                  className="group w-full h-11 rounded-xl bg-[#4E6E81] text-white font-semibold text-sm flex items-center justify-center gap-2 hover:bg-[#3D5767] active:scale-[0.99] transition-all cursor-pointer shadow-sm mt-2 disabled:opacity-60"
                 >
-                  <span>Sign In</span>
+                  <span>{authLoading ? 'Signing In...' : 'Sign In'}</span>
                   <ArrowRight className="w-4 h-4 text-[#5BC496] group-hover:translate-x-0.5 transition-transform" />
                 </button>
               </form>
@@ -268,6 +491,8 @@ export const UnifiedAuthPage: React.FC = () => {
                     onClick={() => {
                       sound.playTap();
                       setErrorBanner(null);
+                      setSignupStep('details');
+                      setVerificationBanner(null);
                       clearAuthSuccess();
                       navigate('/signup');
                     }}
@@ -284,12 +509,41 @@ export const UnifiedAuthPage: React.FC = () => {
               <div className="mb-5 flex flex-col items-center text-center">
                 <UniChargeLogo variant="stacked" size="md" className="mb-3" />
                 <h1 className="text-xl font-bold text-[#1E293B] tracking-tight">
-                  Create Student Account
+                  {signupStep === 'details'
+                    ? 'Create Student Account'
+                    : 'Verify Your Email Address'}
                 </h1>
                 <p className="text-sm text-[#64748B] mt-1">
-                  Register with your USTP ID and campus email. Student portal access is provisioned automatically.
+                  {signupStep === 'details'
+                    ? 'Register with your USTP ID and USTP or personal email. We will email a 6-digit verification code to confirm your account.'
+                    : 'Enter the 6-digit verification code sent to your inbox to complete sign-up.'}
                 </p>
               </div>
+
+              {verificationBanner && signupStep === 'verify' && (
+                <div
+                  role="status"
+                  className="mb-4 p-3 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/50 text-[#1E293B] text-xs font-medium flex flex-col gap-1.5"
+                >
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-[#5BC496] shrink-0" />
+                    <span>{verificationBanner}</span>
+                  </div>
+                  <p className="text-[11px] text-[#475569] pl-6">
+                    Didn&apos;t see it in Primary Inbox? Check your Spam, Promotions, or All Mail folder, or double-check your email spelling.
+                  </p>
+                  {emailPreviewUrl && (
+                    <a
+                      href={emailPreviewUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[#4E6E81] underline font-semibold pl-6"
+                    >
+                      Open test email preview
+                    </a>
+                  )}
+                </div>
+              )}
 
               {errorBanner && (
                 <div
@@ -301,103 +555,214 @@ export const UnifiedAuthPage: React.FC = () => {
                 </div>
               )}
 
-              <form onSubmit={handleSignUpSubmit} className="space-y-3.5">
-                <div>
-                  <label className="block text-xs font-semibold text-[#1E293B] mb-1">
-                    Full Name
-                  </label>
-                  <input
-                    type="text"
-                    value={fullName}
-                    onChange={(e) => setFullName(e.target.value)}
-                    placeholder="e.g. Maria Clara Santos"
-                    required
-                    className="w-full h-10 px-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] placeholder-[#94A3B8] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {signupStep === 'details' ? (
+                <form onSubmit={handleSignUpSubmit} className="space-y-3.5">
                   <div>
                     <label className="block text-xs font-semibold text-[#1E293B] mb-1">
-                      USTP Student ID
+                      Full Name
                     </label>
                     <input
                       type="text"
-                      value={studentId}
-                      onChange={(e) => setStudentId(e.target.value)}
-                      placeholder="2024-30512"
+                      value={fullName}
+                      onChange={(e) => setFullName(e.target.value)}
+                      placeholder="e.g. Maria Clara Santos"
                       required
-                      className="w-full h-10 px-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm font-mono text-[#1E293B] placeholder-[#94A3B8] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15"
+                      className="w-full h-10 px-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] placeholder-[#94A3B8] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15"
                     />
                   </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-[#1E293B] mb-1">
+                        USTP Student ID
+                      </label>
+                      <input
+                        type="text"
+                        value={studentId}
+                        onChange={(e) => setStudentId(e.target.value)}
+                        placeholder="2024-30512"
+                        required
+                        className="w-full h-10 px-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm font-mono text-[#1E293B] placeholder-[#94A3B8] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15"
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="signup-college"
+                        className="block text-xs font-semibold text-[#1E293B] mb-1"
+                      >
+                        College
+                      </label>
+                      <select
+                        id="signup-college"
+                        value={college}
+                        onChange={(e) => {
+                          setCollege(e.target.value);
+                          setCourse('');
+                        }}
+                        required
+                        className="w-full h-10 px-3 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-xs text-[#1E293B] focus:outline-none focus:border-[#4E6E81]"
+                      >
+                        <option value="" disabled>
+                          Select College...
+                        </option>
+                        {USTP_COLLEGES.map((col) => (
+                          <option key={col.code} value={col.value}>
+                            {col.code}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
                   <div>
-                    <label className="block text-xs font-semibold text-[#1E293B] mb-1">
-                      College
+                    <label
+                      htmlFor="signup-course"
+                      className="block text-xs font-semibold text-[#1E293B] mb-1"
+                    >
+                      Course / Program
                     </label>
                     <select
-                      value={college}
-                      onChange={(e) => setCollege(e.target.value)}
-                      className="w-full h-10 px-3 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-xs text-[#1E293B] focus:outline-none focus:border-[#4E6E81]"
+                      id="signup-course"
+                      value={course}
+                      onChange={(e) => setCourse(e.target.value)}
+                      disabled={!college}
+                      required
+                      className="w-full h-10 px-3 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-xs text-[#1E293B] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15 disabled:bg-[#F8FAFC] disabled:text-[#94A3B8] disabled:cursor-not-allowed"
                     >
-                      <option value="College of Information Technology and Computing (CITC)">CITC</option>
-                      <option value="College of Engineering and Architecture (CEA)">CEA</option>
-                      <option value="College of Science and Mathematics (CSM)">CSM</option>
-                      <option value="College of Technology (COT)">COT</option>
+                      <option value="" disabled>
+                        {college ? 'Select Course / Program...' : 'Select a college first...'}
+                      </option>
+                      {availableCourses.map((prog) => (
+                        <option key={prog} value={prog}>
+                          {prog}
+                        </option>
+                      ))}
                     </select>
                   </div>
-                </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-[#1E293B] mb-1">
-                    USTP Campus Email
-                  </label>
-                  <input
-                    type="email"
-                    value={signupEmail}
-                    onChange={(e) => setSignupEmail(e.target.value)}
-                    placeholder="m.santos@ustp.edu.ph"
-                    required
-                    className="w-full h-10 px-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] placeholder-[#94A3B8] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-semibold text-[#1E293B] mb-1">
-                      Password
+                      USTP or Personal Email
                     </label>
                     <input
-                      type="password"
-                      value={signupPassword}
-                      onChange={(e) => setSignupPassword(e.target.value)}
-                      placeholder="Min. 6 characters"
+                      type="email"
+                      value={signupEmail}
+                      onChange={(e) => setSignupEmail(e.target.value)}
+                      placeholder="m.santos@ustp.edu.ph or name@gmail.com"
                       required
-                      className="w-full h-10 px-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] placeholder-[#94A3B8] focus:outline-none focus:border-[#4E6E81]"
+                      className="w-full h-10 px-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] placeholder-[#94A3B8] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15"
                     />
                   </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-[#1E293B] mb-1">
-                      Confirm Password
-                    </label>
-                    <input
-                      type="password"
-                      value={confirmPassword}
-                      onChange={(e) => setConfirmPassword(e.target.value)}
-                      placeholder="Repeat password"
-                      required
-                      className="w-full h-10 px-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] placeholder-[#94A3B8] focus:outline-none focus:border-[#4E6E81]"
-                    />
-                  </div>
-                </div>
 
-                <button
-                  type="submit"
-                  className="group w-full h-11 rounded-xl bg-[#5BC496] text-[#1E293B] font-bold text-sm flex items-center justify-center gap-2 hover:bg-[#48AD80] active:scale-[0.99] transition-all cursor-pointer shadow-sm mt-2"
-                >
-                  <span>Create Account</span>
-                  <ArrowRight className="w-4 h-4 text-[#1E293B] group-hover:translate-x-0.5 transition-transform" />
-                </button>
-              </form>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-[#1E293B] mb-1">
+                        Password
+                      </label>
+                      <input
+                        type="password"
+                        value={signupPassword}
+                        onChange={(e) => setSignupPassword(e.target.value)}
+                        placeholder="Min. 6 characters"
+                        required
+                        className="w-full h-10 px-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] placeholder-[#94A3B8] focus:outline-none focus:border-[#4E6E81]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-[#1E293B] mb-1">
+                        Confirm Password
+                      </label>
+                      <input
+                        type="password"
+                        value={confirmPassword}
+                        onChange={(e) => setConfirmPassword(e.target.value)}
+                        placeholder="Repeat password"
+                        required
+                        className="w-full h-10 px-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-sm text-[#1E293B] placeholder-[#94A3B8] focus:outline-none focus:border-[#4E6E81]"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={authLoading}
+                    className="group w-full h-11 rounded-xl bg-[#5BC496] text-[#1E293B] font-bold text-sm flex items-center justify-center gap-2 hover:bg-[#48AD80] active:scale-[0.99] transition-all cursor-pointer shadow-sm mt-2 disabled:opacity-60"
+                  >
+                    <span>
+                      {authLoading ? 'Sending Verification Code...' : 'Create Account'}
+                    </span>
+                    <ArrowRight className="w-4 h-4 text-[#1E293B] group-hover:translate-x-0.5 transition-transform" />
+                  </button>
+                </form>
+              ) : (
+                <form onSubmit={handleVerifyAndComplete} className="space-y-4">
+                  <div>
+                    <label
+                      htmlFor="verification-code"
+                      className="block text-xs font-semibold text-[#1E293B] mb-1.5"
+                    >
+                      6-Digit Verification Code
+                    </label>
+                    <div className="relative">
+                      <ShieldCheck className="w-4 h-4 text-[#64748B] absolute left-3.5 top-3" />
+                      <input
+                        id="verification-code"
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={6}
+                        value={verificationCode}
+                        onChange={(e) =>
+                          setVerificationCode(e.target.value.replace(/\D/g, '').slice(0, 6))
+                        }
+                        placeholder="000000"
+                        required
+                        autoFocus
+                        className="w-full h-11 pl-10 pr-3.5 rounded-xl bg-[#FFFFFF] border border-[#E2E8F0] text-base font-mono tracking-[0.35em] text-center text-[#1E293B] placeholder-[#94A3B8] focus:outline-none focus:border-[#4E6E81] focus:ring-2 focus:ring-[#4E6E81]/15"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={authLoading}
+                    className="group w-full h-11 rounded-xl bg-[#5BC496] text-[#1E293B] font-bold text-sm flex items-center justify-center gap-2 hover:bg-[#48AD80] active:scale-[0.99] transition-all cursor-pointer shadow-sm disabled:opacity-60"
+                  >
+                    <span>
+                      {authLoading ? 'Verifying & Creating...' : 'Verify & Complete Sign-Up'}
+                    </span>
+                    <ArrowRight className="w-4 h-4 text-[#1E293B] group-hover:translate-x-0.5 transition-transform" />
+                  </button>
+
+                  <div className="flex items-center justify-between pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        sound.playTap();
+                        setErrorBanner(null);
+                        setSignupStep('details');
+                      }}
+                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#64748B] hover:text-[#1E293B] cursor-pointer"
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5" />
+                      <span>Edit details</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={authLoading || resendCooldown > 0}
+                      onClick={triggerSendVerification}
+                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#4E6E81] hover:text-[#5BC496] disabled:text-[#94A3B8] cursor-pointer"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>
+                        {resendCooldown > 0
+                          ? `Resend in ${resendCooldown}s`
+                          : 'Resend code'}
+                      </span>
+                    </button>
+                  </div>
+                </form>
+              )}
 
               <div className="mt-5 pt-4 border-t border-[#E2E8F0] text-center">
                 <p className="text-xs text-[#64748B]">
@@ -407,6 +772,8 @@ export const UnifiedAuthPage: React.FC = () => {
                     onClick={() => {
                       sound.playTap();
                       setErrorBanner(null);
+                      setSignupStep('details');
+                      setVerificationBanner(null);
                       navigate('/login');
                     }}
                     className="font-semibold text-[#4E6E81] hover:text-[#5BC496] transition-colors cursor-pointer"
@@ -433,35 +800,40 @@ export const UnifiedAuthPage: React.FC = () => {
               <UniChargeLogo variant="stacked" size="sm" className="mb-3" />
               <h3 className="text-base font-bold text-[#1E293B]">Reset UniCharge Password</h3>
             </div>
-            {forgotSent ? (
-              <div className="mt-3 space-y-4">
-                <div className="p-3 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/40 text-[#1E293B] text-xs flex items-start gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-[#5BC496] shrink-0 mt-0.5" />
-                  <span>
-                    If an account matches <strong className="font-mono">{forgotEmail}</strong>, a reset link has been dispatched to your campus inbox.
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowForgotModal(false)}
-                  className="w-full h-10 rounded-xl bg-[#4E6E81] text-white text-xs font-semibold hover:bg-[#3D5767] cursor-pointer"
-                >
-                  Return to Sign In
-                </button>
+
+            {forgotError && (
+              <div
+                role="alert"
+                className="mb-3 p-2.5 rounded-xl bg-red-50 border border-red-200 text-[#DC2626] text-xs font-medium flex items-center gap-2"
+              >
+                <AlertCircle className="w-4 h-4 text-[#DC2626] shrink-0" />
+                <span>{forgotError}</span>
               </div>
-            ) : (
-              <form onSubmit={handleForgotSubmit} className="mt-2 space-y-3">
+            )}
+
+            {forgotStep === 'request' ? (
+              <form onSubmit={handleForgotRequestSubmit} className="mt-2 space-y-3">
                 <p className="text-xs text-[#64748B] text-center">
-                  Enter your USTP campus email or ID number and we will send recovery instructions.
+                  Enter your registered email or USTP Student ID and we will send a 6-digit reset code to your account email.
                 </p>
-                <input
-                  type="text"
-                  required
-                  value={forgotEmail}
-                  onChange={(e) => setForgotEmail(e.target.value)}
-                  placeholder="jastinalberca8@gmail.com"
-                  className="w-full h-10 px-3 rounded-xl border border-[#E2E8F0] text-sm text-[#1E293B] focus:outline-none focus:border-[#4E6E81]"
-                />
+                <div>
+                  <label
+                    htmlFor="forgot-identifier"
+                    className="block text-xs font-semibold text-[#1E293B] mb-1"
+                  >
+                    USTP/Personal Email or ID Number
+                  </label>
+                  <input
+                    id="forgot-identifier"
+                    type="text"
+                    required
+                    value={forgotIdentifier}
+                    onChange={(e) => setForgotIdentifier(e.target.value)}
+                    placeholder="jastinalberca8@gmail.com or 2023-30192"
+                    autoFocus
+                    className="w-full h-10 px-3 rounded-xl border border-[#E2E8F0] text-sm text-[#1E293B] focus:outline-none focus:border-[#4E6E81]"
+                  />
+                </div>
                 <div className="flex gap-2 pt-1">
                   <button
                     type="button"
@@ -472,11 +844,153 @@ export const UnifiedAuthPage: React.FC = () => {
                   </button>
                   <button
                     type="submit"
-                    className="flex-1 h-10 rounded-xl bg-[#4E6E81] text-white text-xs font-semibold hover:bg-[#3D5767] cursor-pointer"
+                    disabled={forgotLoading}
+                    className="flex-1 h-10 rounded-xl bg-[#4E6E81] text-white text-xs font-semibold hover:bg-[#3D5767] cursor-pointer disabled:opacity-60"
                   >
-                    Send Reset Link
+                    {forgotLoading ? 'Sending Code...' : 'Send Reset Code'}
                   </button>
                 </div>
+              </form>
+            ) : (
+              <form onSubmit={handleForgotResetSubmit} className="mt-2 space-y-3">
+                <div className="p-3 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/50 text-[#1E293B] text-xs flex flex-col gap-1">
+                  <div className="flex items-start gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-[#5BC496] shrink-0 mt-0.5" />
+                    <span>
+                      A 6-digit password reset code has been sent to{' '}
+                      <strong className="font-mono">{forgotMaskedEmail}</strong>.
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-[#475569] pl-6">
+                    Check Inbox, Spam, or Promotions if you don&apos;t see it within 30 seconds.
+                  </p>
+                  {forgotPreviewUrl && (
+                    <a
+                      href={forgotPreviewUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[#4E6E81] underline font-semibold pl-6"
+                    >
+                      Open test email preview
+                    </a>
+                  )}
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="forgot-code"
+                    className="block text-xs font-semibold text-[#1E293B] mb-1"
+                  >
+                    6-Digit Reset Code
+                  </label>
+                  <input
+                    id="forgot-code"
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={forgotCode}
+                    onChange={(e) =>
+                      setForgotCode(e.target.value.replace(/\D/g, '').slice(0, 6))
+                    }
+                    placeholder="000000"
+                    required
+                    autoFocus
+                    className="w-full h-10 px-3 rounded-xl border border-[#E2E8F0] text-sm font-mono tracking-[0.3em] text-center text-[#1E293B] focus:outline-none focus:border-[#4E6E81]"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="forgot-new-password"
+                    className="block text-xs font-semibold text-[#1E293B] mb-1"
+                  >
+                    New Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="forgot-new-password"
+                      type={showForgotNewPassword ? 'text' : 'password'}
+                      value={forgotNewPassword}
+                      onChange={(e) => setForgotNewPassword(e.target.value)}
+                      placeholder="Min. 6 characters"
+                      required
+                      className="w-full h-10 pl-3 pr-9 rounded-xl border border-[#E2E8F0] text-sm text-[#1E293B] focus:outline-none focus:border-[#4E6E81]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowForgotNewPassword((prev) => !prev)}
+                      aria-label={showForgotNewPassword ? 'Hide password' : 'Show password'}
+                      className="absolute right-2.5 top-2.5 text-[#64748B] hover:text-[#1E293B] cursor-pointer"
+                    >
+                      {showForgotNewPassword ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="forgot-confirm-password"
+                    className="block text-xs font-semibold text-[#1E293B] mb-1"
+                  >
+                    Confirm New Password
+                  </label>
+                  <input
+                    id="forgot-confirm-password"
+                    type="password"
+                    value={forgotConfirmPassword}
+                    onChange={(e) => setForgotConfirmPassword(e.target.value)}
+                    placeholder="Repeat new password"
+                    required
+                    className="w-full h-10 px-3 rounded-xl border border-[#E2E8F0] text-sm text-[#1E293B] focus:outline-none focus:border-[#4E6E81]"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={forgotLoading}
+                  className="w-full h-10 rounded-xl bg-[#5BC496] hover:bg-[#48AD80] text-[#1E293B] text-xs font-bold cursor-pointer disabled:opacity-60"
+                >
+                  {forgotLoading ? 'Resetting Password...' : 'Verify Code & Reset Password'}
+                </button>
+
+                <div className="flex items-center justify-between pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sound.playTap();
+                      setForgotError(null);
+                      setForgotStep('request');
+                    }}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#64748B] hover:text-[#1E293B] cursor-pointer"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Change email/ID</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={forgotLoading || forgotCooldown > 0}
+                    onClick={triggerSendPasswordReset}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#4E6E81] hover:text-[#5BC496] disabled:text-[#94A3B8] cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>
+                      {forgotCooldown > 0 ? `Resend in ${forgotCooldown}s` : 'Resend code'}
+                    </span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowForgotModal(false)}
+                  className="w-full h-9 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#64748B] hover:bg-[#F8FAFC] cursor-pointer"
+                >
+                  Cancel
+                </button>
               </form>
             )}
           </div>

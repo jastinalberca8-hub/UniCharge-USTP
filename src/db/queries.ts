@@ -75,6 +75,21 @@ async function ensureSchemaReady(): Promise<void> {
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS password_hash TEXT,
+      ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'student',
+      ADD COLUMN IF NOT EXISTS college TEXT NOT NULL DEFAULT 'College of Information Technology and Computing (CITC)',
+      ADD COLUMN IF NOT EXISTS degree TEXT NOT NULL DEFAULT 'BS Information Technology',
+      ADD COLUMN IF NOT EXISTS avatar TEXT NOT NULL DEFAULT '',
+      ADD COLUMN IF NOT EXISTS wallet_balance DOUBLE PRECISION NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS biometric_enabled BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS push_notifications BOOLEAN NOT NULL DEFAULT true,
+      ADD COLUMN IF NOT EXISTS overcharge_alerts BOOLEAN NOT NULL DEFAULT true,
+      ADD COLUMN IF NOT EXISTS preferred_payment TEXT NOT NULL DEFAULT 'wallet',
+      ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS profile_completed BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+
     CREATE TABLE IF NOT EXISTS email_verifications (
       id SERIAL PRIMARY KEY,
       email TEXT NOT NULL UNIQUE,

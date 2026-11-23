@@ -292,7 +292,8 @@ export async function sendLockerQrUnlockEmail(params: {
   stationName: string;
   stationCode: string;
   slotNumber: number;
-  compartmentSize: string;
+  compartmentLabel: string;
+  pricingTier: string;
   durationMinutes: number;
   totalFee: number;
   pinCode: string;
@@ -315,16 +316,17 @@ export async function sendLockerQrUnlockEmail(params: {
   const safeName = escapeHtml(params.recipientName || 'Student');
   const safeStation = escapeHtml(params.stationName);
   const safeCode = escapeHtml(params.stationCode);
-  const safeSize = escapeHtml(params.compartmentSize);
+  const safeCompartment = escapeHtml(params.compartmentLabel);
+  const safeTier = escapeHtml(params.pricingTier);
   const safePin = escapeHtml(params.pinCode);
   const safeToken = escapeHtml(params.tokenId);
 
-  const subject = `UniCharge USTP Locker Pass - ${params.stationCode} Slot #${params.slotNumber}`;
+  const subject = `UniCharge USTP Locker Pass - ${params.stationCode} ${params.compartmentLabel}`;
   const text = [
     `Hi ${params.recipientName || 'Student'},`,
     '',
-    `Your UniCharge USTP locker unlock code for ${params.stationName} (${params.stationCode}), Compartment #${params.slotNumber} (Size ${params.compartmentSize}) is ready.`,
-    `Duration: ${params.durationMinutes} minutes`,
+    `Your UniCharge USTP locker unlock code for ${params.stationName} (${params.stationCode}), ${params.compartmentLabel} (${params.pricingTier}) is ready.`,
+    `Duration: ${params.durationMinutes} minutes · Fee: PHP ${params.totalFee}`,
     `6-Digit Backup Code: ${params.pinCode}`,
     `Pass ID: ${params.tokenId}`,
     '',
@@ -338,7 +340,7 @@ export async function sendLockerQrUnlockEmail(params: {
         <h2 style="margin: 0 0 8px; color: #1E293B; font-size: 20px;">UniCharge Kiosk Unlock Pass</h2>
         <p style="margin: 0 0 16px; color: #64748B; font-size: 14px;">Hi ${safeName},</p>
         <p style="margin: 0 0 18px; color: #334155; font-size: 14px; line-height: 1.5;">
-          Tap <strong>Scan QR</strong> on the <strong>${safeStation}</strong> (${safeCode}) kiosk and hold this QR code up to the camera to unlock <strong>Compartment #${params.slotNumber}</strong> (Size ${safeSize}, ${params.durationMinutes} min).
+          Tap <strong>Scan QR</strong> on the <strong>${safeStation}</strong> (${safeCode}) kiosk and hold this QR code up to the camera to unlock <strong>${safeCompartment}</strong> (${safeTier}, ${params.durationMinutes} min).
         </p>
         <div style="background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 18px; text-align: center; margin: 0 0 18px;">
           <img src="cid:unicharge-qr-pass" alt="UniCharge Kiosk QR Code" width="220" height="220" style="display: block; margin: 0 auto 14px; border-radius: 8px; background: #FFFFFF;" />

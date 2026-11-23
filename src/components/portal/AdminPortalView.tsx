@@ -1,5 +1,11 @@
 import React, { useState } from 'react';
 import { useUniCharge } from '../../context/UniChargeContext';
+import {
+  CHARGING_SLOT_COUNT,
+  STORAGE_SLOT_COUNT,
+  TOTAL_COMPARTMENT_COUNT,
+  formatCompartmentLabel,
+} from '../../constants/pricing';
 import { sound } from '../../utils/audio';
 import { KioskHardwareSimulator } from '../hardware/KioskHardwareSimulator';
 import {
@@ -38,8 +44,7 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
     stations,
     users,
     securityAlerts,
-    hardwareKioskStationId,
-    setHardwareKioskStationId,
+    adminStationActivity,
     adminRemoteUnlockSlot,
     adminToggleSlotMaintenance,
     adminProvisionStaff,
@@ -55,18 +60,22 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
   const [provisionSuccess, setProvisionSuccess] = useState<string | null>(null);
   const [roleFilter, setRoleFilter] = useState<'all' | 'student' | 'admin'>('all');
 
-  const totalSlots = stations.reduce((sum, st) => sum + st.totalSlots, 0);
-  const availableSlots = stations.reduce((sum, st) => sum + st.availableSlots, 0);
-  const inUseSlots = stations.reduce(
-    (sum, st) => sum + st.slots.filter((s) => s.status === 'in_use').length,
-    0
-  );
-  const maintenanceSlots = totalSlots - availableSlots - inUseSlots;
-  const totalPowerWatts = stations.reduce((sum, st) => sum + st.powerDrawWatts, 0);
+  const station = stations[0];
+  const totalSlots = station?.totalSlots || TOTAL_COMPARTMENT_COUNT;
+  const availableSlots = station?.availableSlots || 0;
+  const inUseSlots = station
+    ? station.slots.filter((s) => s.status === 'in_use').length
+    : 0;
+  const maintenanceSlots = Math.max(0, totalSlots - availableSlots - inUseSlots);
+  const totalPowerWatts = station?.powerDrawWatts || 0;
   const unresolvedAlerts = securityAlerts.filter((a) => !a.resolved).length;
 
-  const selectedHwStation =
-    stations.find((s) => s.id === hardwareKioskStationId) || stations[0];
+  const chargingFree = station
+    ? station.slots.filter((s) => s.category === 'charging' && s.status === 'available').length
+    : 0;
+  const storageFree = station
+    ? station.slots.filter((s) => s.category === 'storage' && s.status === 'available').length
+    : 0;
 
   const handleCreateStaff = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -89,7 +98,7 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
     setShowProvisionModal(false);
   };
 
-  // 1. FLEET TELEMETRY OVERVIEW
+  // 1. STATION TELEMETRY OVERVIEW
   if (section === 'overview') {
     return (
       <div className="space-y-6">
@@ -99,7 +108,7 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
               Admin &amp; Telemetry Portal
             </h1>
             <p className="text-sm text-[#64748B]">
-              Real-time campus kiosk fleet health, solenoid overrides, and power telemetry.
+              Real-time UniCharge Station health, 20-compartment solenoid overrides, and power telemetry.
             </p>
           </div>
           <div className="flex items-center gap-2.5">
@@ -120,28 +129,30 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
           </div>
         </div>
 
-        {/* Fleet KPI Strip */}
+        {/* Station KPI Strip */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-[#FFFFFF] p-5 rounded-2xl border border-[#E2E8F0]">
-            <span className="text-xs font-medium text-[#64748B]">Kiosks Online</span>
+            <span className="text-xs font-medium text-[#64748B]">Station Status</span>
             <div className="text-2xl font-bold text-[#5BC496] font-mono mt-1">
-              {stations.filter((s) => s.online).length} / {stations.length}
+              {station?.online ? 'ONLINE' : 'OFFLINE'}
             </div>
-            <span className="text-xs text-[#64748B] mt-2 block">ESP32-S3 MQTT mesh nominal</span>
-          </div>
-
-          <div className="bg-[#FFFFFF] p-5 rounded-2xl border border-[#E2E8F0]">
-            <span className="text-xs font-medium text-[#64748B]">Active / Occupied Slots</span>
-            <div className="text-2xl font-bold text-[#4E6E81] font-mono mt-1">
-              {inUseSlots} / {totalSlots}
-            </div>
-            <span className="text-xs text-[#64748B] mt-2 block">
-              {availableSlots} free · {maintenanceSlots} maintenance
+            <span className="text-xs text-[#64748B] mt-2 block font-mono">
+              {station?.campusCode} · ESP32-S3 MQTT
             </span>
           </div>
 
           <div className="bg-[#FFFFFF] p-5 rounded-2xl border border-[#E2E8F0]">
-            <span className="text-xs font-medium text-[#64748B]">Aggregate Fleet Load</span>
+            <span className="text-xs font-medium text-[#64748B]">Compartment Occupancy</span>
+            <div className="text-2xl font-bold text-[#4E6E81] font-mono mt-1">
+              {inUseSlots} / {totalSlots} Busy
+            </div>
+            <span className="text-xs text-[#64748B] mt-2 block">
+              {chargingFree}/{CHARGING_SLOT_COUNT} Charging Free · {storageFree}/{STORAGE_SLOT_COUNT} Storage Free
+            </span>
+          </div>
+
+          <div className="bg-[#FFFFFF] p-5 rounded-2xl border border-[#E2E8F0]">
+            <span className="text-xs font-medium text-[#64748B]">Station Power Load</span>
             <div className="text-2xl font-bold text-[#1E293B] font-mono mt-1">
               {(totalPowerWatts / 1000).toFixed(2)} kW
             </div>
@@ -161,71 +172,127 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
           </div>
         </div>
 
-        {/* Station Fleet Telemetry Table */}
+        {/* Single Station Telemetry Summary */}
+        {station && (
+          <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] overflow-hidden">
+            <div className="px-6 py-4 border-b border-[#E2E8F0] flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-base font-bold text-[#4E6E81]">
+                  {station.name} ({station.campusCode})
+                </h2>
+                <span className="text-xs text-[#64748B]">
+                  {CHARGING_SLOT_COUNT} Charging Compartments (#01–#15) · {STORAGE_SLOT_COUNT} Storage Compartments (S1–S5)
+                </span>
+              </div>
+              <button
+                onClick={() => {
+                  sound.playTap();
+                  onChangeSection('hardware');
+                }}
+                className="px-3.5 py-1.5 rounded-lg bg-[#4E6E81] text-white text-xs font-semibold hover:bg-[#3D5767] cursor-pointer transition-colors"
+              >
+                Inspect All 20 Solenoids
+              </button>
+            </div>
+            <div className="p-6 grid grid-cols-1 sm:grid-cols-4 gap-4 text-xs">
+              <div className="p-3.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
+                <span className="text-[#64748B] block">Free Compartments</span>
+                <span className="text-lg font-bold font-mono text-[#5BC496]">
+                  {availableSlots} / {totalSlots}
+                </span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
+                <span className="text-[#64748B] block">Active Sessions</span>
+                <span className="text-lg font-bold font-mono text-[#F59E0B]">
+                  {inUseSlots} Busy
+                </span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
+                <span className="text-[#64748B] block">Maintenance Lock</span>
+                <span className="text-lg font-bold font-mono text-[#DC2626]">
+                  {maintenanceSlots} Maint
+                </span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
+                <span className="text-[#64748B] block">Hardware Link</span>
+                <span className="inline-flex items-center gap-1.5 mt-1 font-semibold text-[#1E293B]">
+                  <Radio className="w-3.5 h-3.5 text-[#5BC496]" /> Online
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Live Student Transactions at UniCharge Station */}
         <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] overflow-hidden">
-          <div className="px-6 py-4 border-b border-[#E2E8F0] flex items-center justify-between">
-            <h2 className="text-base font-bold text-[#4E6E81]">Deployed Campus Kiosk Fleet</h2>
-            <span className="text-xs font-mono text-[#64748B]">Live Hardware Telemetry</span>
+          <div className="px-6 py-4 border-b border-[#E2E8F0] flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-base font-bold text-[#4E6E81]">
+                Live UniCharge Station Transactions
+              </h2>
+              <span className="text-xs text-[#64748B]">
+                Every student reservation, QR unlock, active session, and retrieval updates here automatically.
+              </span>
+            </div>
+            <span className="text-xs font-mono text-[#64748B]">
+              {adminStationActivity.pendingReservations.length} Reserved ·{' '}
+              {adminStationActivity.activeSessions.length} Active
+            </span>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-[#F8FAFC] text-[#64748B] border-b border-[#E2E8F0]">
-                <tr>
-                  <th className="py-3 px-6 font-semibold">Kiosk Code</th>
-                  <th className="py-3 px-4 font-semibold">Station Location</th>
-                  <th className="py-3 px-4 font-semibold">Compartment Occupancy</th>
-                  <th className="py-3 px-4 font-semibold">Power Draw</th>
-                  <th className="py-3 px-4 font-semibold">Status</th>
-                  <th className="py-3 px-6 font-semibold text-right">Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#E2E8F0]">
-                {stations.map((st) => {
-                  const busy = st.slots.filter((s) => s.status === 'in_use').length;
-                  const maint = st.slots.filter((s) => s.status === 'maintenance').length;
-                  return (
-                    <tr key={st.id} className="hover:bg-[#F8FAFC]">
-                      <td className="py-3.5 px-6 font-mono font-bold text-[#4E6E81]">
-                        {st.campusCode}
+            {adminStationActivity.recentTransactions.length === 0 ? (
+              <div className="py-8 px-6 text-center text-xs text-[#64748B]">
+                No student locker transactions recorded yet.
+              </div>
+            ) : (
+              <table className="w-full text-left text-xs">
+                <thead className="bg-[#F8FAFC] text-[#64748B] border-b border-[#E2E8F0]">
+                  <tr>
+                    <th className="py-3 px-6 font-semibold">Student</th>
+                    <th className="py-3 px-4 font-semibold">Compartment</th>
+                    <th className="py-3 px-4 font-semibold">Pricing Tier</th>
+                    <th className="py-3 px-4 font-semibold">Fee</th>
+                    <th className="py-3 px-6 font-semibold text-right">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#E2E8F0]">
+                  {adminStationActivity.recentTransactions.map((tx) => (
+                    <tr key={`${tx.kind}-${tx.id}`} className="hover:bg-[#F8FAFC]">
+                      <td className="py-3 px-6">
+                        <div className="font-semibold text-[#1E293B]">{tx.userName}</div>
+                        <div className="text-[11px] font-mono text-[#64748B]">
+                          {tx.studentIdNumber} · {tx.id}
+                        </div>
                       </td>
-                      <td className="py-3.5 px-4">
-                        <div className="font-semibold text-[#1E293B]">{st.name}</div>
-                        <div className="text-[#64748B] text-[11px]">{st.floor}</div>
+                      <td className="py-3 px-4 font-mono font-semibold text-[#4E6E81]">
+                        {formatCompartmentLabel(tx.slotNumber)}
                       </td>
-                      <td className="py-3.5 px-4 font-mono">
-                        <span className="text-[#4E6E81] font-semibold">{st.availableSlots} Free</span>
-                        {' · '}
-                        <span className="text-[#F59E0B] font-semibold">{busy} Busy</span>
-                        {maint > 0 && (
-                          <>
-                            {' · '}
-                            <span className="text-[#DC2626] font-semibold">{maint} Maint</span>
-                          </>
-                        )}
+                      <td className="py-3 px-4 text-[#1E293B]">{tx.pricingTier}</td>
+                      <td className="py-3 px-4 font-mono font-bold text-[#1E293B]">
+                        ₱{tx.totalFee.toFixed(2)}
                       </td>
-                      <td className="py-3.5 px-4 font-mono text-[#1E293B]">{st.powerDrawWatts} W</td>
-                      <td className="py-3.5 px-4">
-                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-[#EBF9F3] text-[#1E293B] font-semibold">
-                          <Radio className="w-3.5 h-3.5 text-[#5BC496]" /> Online
+                      <td className="py-3 px-6 text-right">
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                            tx.kind === 'reserved'
+                              ? 'bg-amber-50 text-[#B45309] border border-amber-200'
+                              : tx.kind === 'active'
+                              ? 'bg-[#EBF9F3] text-[#15803D] border border-[#5BC496]/40'
+                              : 'bg-[#F8FAFC] text-[#64748B] border border-[#E2E8F0]'
+                          }`}
+                        >
+                          {tx.kind === 'reserved'
+                            ? 'Reserved (Awaiting Scan)'
+                            : tx.kind === 'active'
+                            ? 'Active Session'
+                            : 'Completed'}
                         </span>
                       </td>
-                      <td className="py-3.5 px-6 text-right">
-                        <button
-                          onClick={() => {
-                            sound.playTap();
-                            setHardwareKioskStationId(st.id);
-                            onChangeSection('hardware');
-                          }}
-                          className="px-3 py-1.5 rounded-lg bg-[#4E6E81] text-white text-xs font-semibold hover:bg-[#3D5767] cursor-pointer transition-colors"
-                        >
-                          Inspect Solenoids
-                        </button>
-                      </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         </div>
       </div>
@@ -233,47 +300,58 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
   }
 
   // 2. HARDWARE & SOLENOID REMOTE OVERRIDE
-  if (section === 'hardware') {
+  if (section === 'hardware' && station) {
     return (
       <div className="space-y-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-bold text-[#4E6E81] tracking-tight">
-              Kiosk Hardware &amp; Solenoid Override
-            </h1>
-            <p className="text-sm text-[#64748B]">
-              Remotely trigger emergency compartment unlatching or lock faulty ports into maintenance mode.
-            </p>
-          </div>
-          <select
-            value={hardwareKioskStationId}
-            onChange={(e) => {
-              sound.playTap();
-              setHardwareKioskStationId(e.target.value);
-            }}
-            className="h-10 px-3 rounded-xl border border-[#E2E8F0] bg-[#FFFFFF] text-xs font-semibold text-[#4E6E81] focus:outline-none focus:border-[#4E6E81]"
-          >
-            {stations.map((st) => (
-              <option key={st.id} value={st.id}>
-                {st.campusCode} — {st.name}
-              </option>
-            ))}
-          </select>
+        <div>
+          <h1 className="text-2xl font-bold text-[#4E6E81] tracking-tight">
+            Kiosk Hardware &amp; Solenoid Override
+          </h1>
+          <p className="text-sm text-[#64748B]">
+            {station.name} ({station.campusCode}) — manage all {TOTAL_COMPARTMENT_COUNT} compartments ({CHARGING_SLOT_COUNT} Charging · {STORAGE_SLOT_COUNT} Storage).
+          </p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          {/* Left: Admin Compartment Override Controls */}
-          <div className="lg:col-span-5 bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-5 space-y-3">
-            <h2 className="text-sm font-bold text-[#4E6E81]">
-              Compartment Control ({selectedHwStation.campusCode})
-            </h2>
-            <div className="divide-y divide-[#E2E8F0]">
-              {selectedHwStation.slots.map((slot) => (
-                <div key={slot.id} className="py-3 flex items-center justify-between gap-2">
-                  <div>
+        {/* Full-Width Physical 20-Compartment Simulator */}
+        <div className="rounded-2xl border border-[#E2E8F0] overflow-hidden bg-[#F8FAFC] shadow-sm">
+          <KioskHardwareSimulator />
+        </div>
+
+        {/* Admin Compartment Override Controls */}
+        <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-bold text-[#4E6E81]">
+                Compartment Control ({station.campusCode})
+              </h2>
+              <p className="text-xs text-[#64748B]">
+                Force-unlock individual 12V solenoids or lock compartments for maintenance.
+              </p>
+            </div>
+            <span className="text-xs font-mono text-[#64748B]">
+              {availableSlots}/{totalSlots} Available · {inUseSlots} Busy
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {station.slots.map((slot) => {
+              const slotSession = adminStationActivity.activeSessions.find(
+                (s) => s.slotNumber === slot.slotNumber
+              );
+              const slotReservation = adminStationActivity.pendingReservations.find(
+                (r) => r.slotNumber === slot.slotNumber
+              );
+              const slotActivity = slotSession || slotReservation;
+
+              return (
+                <div
+                  key={slot.id}
+                  className="p-3.5 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC]/60 flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="font-mono font-bold text-xs text-[#1E293B]">
-                        Slot #{slot.slotNumber} ({slot.size})
+                        {formatCompartmentLabel(slot.slotNumber)}
                       </span>
                       <span
                         className={`text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded ${
@@ -284,29 +362,39 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                             : 'bg-red-50 text-[#DC2626]'
                         }`}
                       >
-                        {slot.status.replace('_', ' ')}
+                        {slotReservation
+                          ? 'reserved'
+                          : slot.status === 'in_use'
+                          ? 'busy'
+                          : slot.status.replace('_', ' ')}
                       </span>
                     </div>
-                    <span className="text-[11px] text-[#64748B] font-mono">
+                    <span className="text-[11px] text-[#64748B] font-mono block mt-0.5">
                       {slot.currentTemp}°C · {slot.chargingPower}
                     </span>
+                    {slotActivity && (
+                      <span className="text-[11px] text-[#4E6E81] font-medium block truncate mt-0.5">
+                        {slotActivity.kind === 'reserved' ? 'Reserved by' : 'In use by'}{' '}
+                        {slotActivity.userName} ({slotActivity.pricingTier})
+                      </span>
+                    )}
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 shrink-0">
                     <button
-                      onClick={() => adminRemoteUnlockSlot(selectedHwStation.id, slot.slotNumber)}
+                      onClick={() => adminRemoteUnlockSlot(station.id, slot.slotNumber)}
                       title="Force Unlock Compartment"
-                      className="px-2.5 py-1.5 rounded-lg bg-[#4E6E81] text-white text-[11px] font-semibold hover:bg-[#3D5767] flex items-center gap-1 cursor-pointer transition-colors"
+                      className="px-2.5 py-1.5 rounded-lg bg-[#4E6E81] text-white text-[11px] font-semibold hover:bg-[#3D5767] flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap"
                     >
                       <Unlock className="w-3 h-3 text-[#5BC496]" />
                       <span>Force Unlock</span>
                     </button>
                     <button
-                      onClick={() => adminToggleSlotMaintenance(selectedHwStation.id, slot.slotNumber)}
+                      onClick={() => adminToggleSlotMaintenance(station.id, slot.slotNumber)}
                       title="Toggle Maintenance"
-                      className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold flex items-center gap-1 cursor-pointer ${
+                      className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold flex items-center gap-1 cursor-pointer whitespace-nowrap ${
                         slot.status === 'maintenance'
                           ? 'bg-red-50 border-red-200 text-[#DC2626]'
-                          : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#64748B] hover:bg-[#EDF2F5]'
+                          : 'bg-[#FFFFFF] border-[#E2E8F0] text-[#64748B] hover:bg-[#EDF2F5]'
                       }`}
                     >
                       <Wrench className="w-3 h-3" />
@@ -314,13 +402,8 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                     </button>
                   </div>
                 </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Right: Live Physical 8-Door Simulator */}
-          <div className="lg:col-span-7 rounded-2xl border border-[#E2E8F0] overflow-hidden bg-[#121212] shadow-sm">
-            <KioskHardwareSimulator />
+              );
+            })}
           </div>
         </div>
       </div>
@@ -544,7 +627,7 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-bold text-[#1E293B]">{alert.type}</span>
                     <span className="text-xs font-mono text-[#64748B]">
-                      {alert.stationCode} · Slot #{alert.slotNumber}
+                      {alert.stationCode} · {formatCompartmentLabel(alert.slotNumber)}
                     </span>
                   </div>
                   <p className="text-xs text-[#64748B] mt-0.5">{alert.message}</p>
@@ -577,7 +660,7 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
     <div className="max-w-2xl space-y-5">
       <div>
         <h1 className="text-2xl font-bold text-[#4E6E81] tracking-tight">
-          {section === 'support' ? 'Operations Support' : 'Fleet Threshold Settings'}
+          {section === 'support' ? 'Operations Support' : 'Station Threshold Settings'}
         </h1>
         <p className="text-sm text-[#64748B]">
           Configure automated thermal cut-off limits and campus ICT maintenance escalation.

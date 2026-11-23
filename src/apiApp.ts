@@ -20,16 +20,23 @@ import {
   createUnlockTokenDb,
   endSessionDb,
   getBootstrapData,
+  getStationSyncStateDb,
   getUnlockTokenByIdDb,
+  recordTamperAlertDb,
   registerStudentUserDb,
   requestPasswordResetDb,
   resetPasswordWithCodeDb,
   startSessionDb,
   topUpWalletDb,
+  updateKioskDoorStateDb,
   updateUserProfileDb,
   verifyAndConsumeUnlockTokenDb,
 } from './db/queries.ts';
-import type { LockerSize, LockerStatus, ServiceType } from './types/index.ts';
+import {
+  UNICHARGE_STATION_ID,
+  formatCompartmentLabel,
+} from './constants/pricing.ts';
+import type { LockerStatus, ServiceType } from './types/index.ts';
 
 export const apiApp = express();
 
@@ -243,6 +250,20 @@ apiApp.get('/api/bootstrap', requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
+apiApp.get('/api/station/sync', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const uid = req.user!.uid;
+    const email = req.user!.email || '';
+    const data = await getStationSyncStateDb(uid, email);
+    res.json(data);
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : 'Failed to sync station state';
+    console.error('Station sync route error:', error);
+    res.status(500).json({ error: message });
+  }
+});
+
 apiApp.post('/api/wallet/topup', requireAuth, async (req: AuthRequest, res) => {
   try {
     const uid = req.user!.uid;
@@ -298,22 +319,18 @@ apiApp.post('/api/kiosk/unlock-tokens', requireAuth, async (req: AuthRequest, re
       stationId,
       slotNumber,
       serviceType,
-      compartmentSize,
+      pricingTier,
       durationMinutes,
       paymentMethod,
     } = req.body ?? {};
 
-    if (!stationId) {
-      return res.status(400).json({ error: 'Station ID is required.' });
-    }
-
-    const { token, userEmail, userName } = await createUnlockTokenDb({
+    const { token, userEmail, userName, stations } = await createUnlockTokenDb({
       uid,
-      stationId: String(stationId),
+      stationId: String(stationId || UNICHARGE_STATION_ID),
       ...(typeof slotNumber === 'number' ? { slotNumber } : {}),
-      serviceType: String(serviceType || 'both') as ServiceType,
-      compartmentSize: String(compartmentSize || 'S') as LockerSize,
-      durationMinutes: Number(durationMinutes) || 60,
+      serviceType: String(serviceType || 'charging') as ServiceType,
+      ...(typeof pricingTier === 'string' && pricingTier.trim() ? { pricingTier } : {}),
+      durationMinutes: Number(durationMinutes) || 120,
       paymentMethod: String(paymentMethod || 'wallet') as
         | 'wallet'
         | 'gcash'
@@ -334,7 +351,8 @@ apiApp.post('/api/kiosk/unlock-tokens', requireAuth, async (req: AuthRequest, re
         stationName: token.stationName,
         stationCode: token.stationCode,
         slotNumber: token.slotNumber,
-        compartmentSize: token.compartmentSize,
+        compartmentLabel: formatCompartmentLabel(token.slotNumber),
+        pricingTier: token.pricingTier,
         durationMinutes: token.durationMinutes,
         totalFee: token.totalFee,
         pinCode: token.pinCode,
@@ -362,6 +380,7 @@ apiApp.post('/api/kiosk/unlock-tokens', requireAuth, async (req: AuthRequest, re
         ...(emailError ? { emailError } : {}),
         ...(emailPreviewUrl ? { emailPreviewUrl } : {}),
       },
+      stations,
       emailSent,
       emailSentTo: userEmail,
       ...(emailDeliveryMode ? { deliveryMode: emailDeliveryMode } : {}),
@@ -395,7 +414,8 @@ apiApp.post('/api/kiosk/email-unlock-qr', requireAuth, async (req: AuthRequest, 
       stationName: token.stationName,
       stationCode: token.stationCode,
       slotNumber: token.slotNumber,
-      compartmentSize: token.compartmentSize,
+      compartmentLabel: formatCompartmentLabel(token.slotNumber),
+      pricingTier: token.pricingTier,
       durationMinutes: token.durationMinutes,
       totalFee: token.totalFee,
       pinCode: token.pinCode,
@@ -428,12 +448,61 @@ apiApp.post('/api/kiosk/email-unlock-qr', requireAuth, async (req: AuthRequest, 
 apiApp.delete('/api/kiosk/unlock-tokens/:tokenId', requireAuth, async (req: AuthRequest, res) => {
   try {
     const uid = req.user!.uid;
-    await cancelUnlockTokenDb(uid, String(req.params.tokenId || ''));
-    res.json({ ok: true });
+    const stations = await cancelUnlockTokenDb(uid, String(req.params.tokenId || ''));
+    res.json({ ok: true, stations });
   } catch (error: unknown) {
     const message =
       error instanceof Error ? error.message : 'Failed to cancel pending unlock QR.';
     console.error('Cancel unlock token error:', error);
+    res.status(500).json({ error: message });
+  }
+});
+
+apiApp.post('/api/kiosk/door-state', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const uid = req.user!.uid;
+    const email = req.user!.email || '';
+    const syncState = await getStationSyncStateDb(uid, email);
+    const { stationId, slotNumber, isDoorOpen } = req.body ?? {};
+    if (typeof slotNumber !== 'number') {
+      return res.status(400).json({ error: 'Valid slotNumber is required.' });
+    }
+    const stations = await updateKioskDoorStateDb({
+      uid,
+      role: syncState.user.role,
+      stationId: String(stationId || UNICHARGE_STATION_ID),
+      slotNumber,
+      isDoorOpen: Boolean(isDoorOpen),
+    });
+    res.json({ ok: true, stations });
+  } catch (error: unknown) {
+    if (error instanceof AuthValidationError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    const message =
+      error instanceof Error ? error.message : 'Failed to update compartment door state.';
+    console.error('Door state route error:', error);
+    res.status(500).json({ error: message });
+  }
+});
+
+apiApp.post('/api/kiosk/tamper-alert', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const uid = req.user!.uid;
+    const { stationId, slotNumber } = req.body ?? {};
+    if (typeof slotNumber !== 'number') {
+      return res.status(400).json({ error: 'Valid slotNumber is required.' });
+    }
+    const result = await recordTamperAlertDb({
+      uid,
+      stationId: String(stationId || UNICHARGE_STATION_ID),
+      slotNumber,
+    });
+    res.json({ ok: true, ...result });
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : 'Failed to record tamper alert.';
+    console.error('Tamper alert route error:', error);
     res.status(500).json({ error: message });
   }
 });
@@ -487,7 +556,7 @@ apiApp.post('/api/sessions/end', requireAuth, async (req: AuthRequest, res) => {
     if (!sessionId || !stationId || typeof slotNumber !== 'number') {
       return res.status(400).json({ error: 'Invalid end session payload' });
     }
-    await endSessionDb({
+    const stations = await endSessionDb({
       uid,
       sessionId,
       stationId,
@@ -495,7 +564,7 @@ apiApp.post('/api/sessions/end', requireAuth, async (req: AuthRequest, res) => {
       receiptNumber: String(receiptNumber || `USTP-REC-${Date.now()}`),
       dateLabel: String(dateLabel || 'Just now'),
     });
-    res.json({ ok: true });
+    res.json({ ok: true, stations });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Failed to end session';
     console.error('End session route error:', error);
@@ -512,14 +581,14 @@ apiApp.post('/api/admin/slots/update', requireAuth, async (req: AuthRequest, res
       return res.status(403).json({ error: 'Forbidden: Admin access required' });
     }
     const { stationId, slotNumber, status, isDoorOpen, isLocked } = req.body ?? {};
-    await adminUpdateSlotDb({
+    const stations = await adminUpdateSlotDb({
       stationId: String(stationId),
       slotNumber: Number(slotNumber),
       status: status as LockerStatus,
       isDoorOpen: typeof isDoorOpen === 'boolean' ? isDoorOpen : undefined,
       isLocked: typeof isLocked === 'boolean' ? isLocked : undefined,
     });
-    res.json({ ok: true });
+    res.json({ ok: true, stations });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Failed to update slot';
     console.error('Admin slot update error:', error);
@@ -536,8 +605,8 @@ apiApp.post('/api/admin/alerts/resolve', requireAuth, async (req: AuthRequest, r
       return res.status(403).json({ error: 'Forbidden: Admin access required' });
     }
     const { alertId } = req.body ?? {};
-    await adminResolveAlertDb(String(alertId));
-    res.json({ ok: true });
+    const securityAlerts = await adminResolveAlertDb(String(alertId));
+    res.json({ ok: true, securityAlerts });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Failed to resolve alert';
     console.error('Admin resolve alert error:', error);

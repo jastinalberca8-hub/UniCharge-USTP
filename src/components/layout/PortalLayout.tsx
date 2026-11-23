@@ -3,11 +3,11 @@ import { useUniCharge } from '../../context/UniChargeContext';
 import { sound } from '../../utils/audio';
 import { UniChargeLogo } from '../brand/UniChargeLogo';
 import { UserAvatar } from '../brand/UserAvatar';
+import { formatCompartmentLabel } from '../../constants/pricing';
 import {
   Menu,
   Zap,
   LayoutDashboard,
-  MapPin,
   BatteryCharging,
   Wallet,
   Settings,
@@ -88,7 +88,6 @@ export const PortalLayout: React.FC = () => {
     badge?: string | number;
   }[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'stations', label: 'Stations Map', icon: MapPin },
     {
       id: 'sessions',
       label: 'My Sessions',
@@ -144,30 +143,36 @@ export const PortalLayout: React.FC = () => {
     setMobileDrawerOpen(false);
   };
 
-  const renderSidebarContent = () => (
-    <div className="flex flex-col h-full bg-[#FFFFFF] text-[#1E293B] select-none">
-      {/* Top Workspace Header inside Sidebar */}
-      <div className="px-5 py-3.5 border-b border-[#E2E8F0] shrink-0">
-        <UniChargeLogo
-          variant="horizontal"
-          size="sm"
-          subtitle={isAdmin ? 'Admin Portal' : 'Student Portal'}
-        />
-      </div>
+  const renderSidebarContent = (showBrandHeader: boolean) => (
+    <div className="flex flex-col min-h-full bg-[#FFFFFF] text-[#1E293B] select-none">
+      {/* Drawer Header shown only in slide-over mobile/tablet drawer (desktop top bar already shows brand) */}
+      {showBrandHeader && (
+        <div className="px-4 py-3.5 pr-12 border-b border-[#E2E8F0] shrink-0">
+          <UniChargeLogo
+            variant="horizontal"
+            size="sm"
+            subtitle={isAdmin ? 'Admin Portal' : 'Student Portal'}
+          />
+        </div>
+      )}
 
       {/* Main Navigation Links */}
-      <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+      <nav className="px-3 pt-4 pb-3 space-y-1 shrink-0">
+        <div className="px-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-[#64748B]">
+          {isAdmin ? 'ADMINISTRATION' : 'NAVIGATION'}
+        </div>
+
         {(isAdmin ? adminNavItems : studentNavItems).map((item) => {
           const Icon = item.icon;
-          const isActive = isAdmin
-            ? adminSection === item.id
-            : studentSection === item.id;
+          const isActive =
+            !showProfileView &&
+            (isAdmin ? adminSection === item.id : studentSection === item.id);
 
           return (
             <button
               key={item.id}
               onClick={() => handleSelectNav(item.id)}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm transition-colors cursor-pointer ${
+              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
                 isActive
                   ? 'bg-[#EDF2F5] text-[#4E6E81] font-bold'
                   : 'text-[#64748B] font-medium hover:bg-[#F8FAFC] hover:text-[#1E293B]'
@@ -194,9 +199,9 @@ export const PortalLayout: React.FC = () => {
         })}
       </nav>
 
-      {/* Bottom ACCOUNT Section */}
-      <div className="px-3 py-4 border-t border-[#E2E8F0] space-y-1 shrink-0">
-        <div className="px-3 pb-1.5 text-[10px] font-bold uppercase tracking-wider text-[#64748B]">
+      {/* ACCOUNT Section */}
+      <div className="px-3 pt-3 pb-4 border-t border-[#E2E8F0] space-y-1 shrink-0">
+        <div className="px-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-[#64748B]">
           ACCOUNT
         </div>
 
@@ -250,7 +255,7 @@ export const PortalLayout: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-[#1E293B] flex flex-col">
       {/* Clean White Top Header Bar */}
-      <header className="sticky top-0 z-30 h-16 bg-[#FFFFFF] border-b border-[#E2E8F0] px-4 lg:px-6 flex items-center justify-between gap-4">
+      <header className="sticky top-0 z-30 h-16 shrink-0 bg-[#FFFFFF] border-b border-[#E2E8F0] px-4 lg:px-6 flex items-center justify-between gap-4">
         {/* Left: Hamburger + Brand + Role Badge */}
         <div className="flex items-center gap-3 min-w-0">
           <button
@@ -354,7 +359,7 @@ export const PortalLayout: React.FC = () => {
                       <div key={al.id} className="p-2.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
                         <span className="font-semibold text-[#1E293B] block">{al.type}</span>
                         <span className="text-[#64748B] text-[11px]">
-                          {al.stationCode} · Slot #{al.slotNumber} · {al.timestamp}
+                          {al.stationCode} · {formatCompartmentLabel(al.slotNumber)} · {al.timestamp}
                         </span>
                       </div>
                     ))
@@ -362,7 +367,7 @@ export const PortalLayout: React.FC = () => {
                     <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-center space-y-1">
                       <span className="font-semibold text-[#1E293B] block">
                         {activeSession
-                          ? `Slot #${activeSession.slotNumber} Charging (${activeSession.batteryCurrent}%)`
+                          ? `${formatCompartmentLabel(activeSession.slotNumber)} Charging (${activeSession.batteryCurrent}%)`
                           : 'No real-time alerts yet'}
                       </span>
                       <span className="text-[#64748B] text-[11px] block">
@@ -400,7 +405,7 @@ export const PortalLayout: React.FC = () => {
                                   {n.message}
                                 </p>
                                 <span className="text-[10px] font-mono text-[#64748B] mt-1 block">
-                                  {n.stationCode} · Slot #{n.slotNumber} ·{' '}
+                                  {n.stationCode} · {formatCompartmentLabel(n.slotNumber)} ·{' '}
                                   {new Date(n.createdAtMs).toLocaleTimeString([], {
                                     hour: '2-digit',
                                     minute: '2-digit',
@@ -464,15 +469,17 @@ export const PortalLayout: React.FC = () => {
       </header>
 
       {/* Main Workspace with Collapsible Left Sidebar */}
-      <div className="flex-1 flex relative">
-        {/* Desktop Collapsible Sidebar */}
+      <div className="flex-1 flex items-start relative">
+        {/* Desktop Collapsible Sticky Sidebar */}
         <aside
-          className={`hidden lg:block shrink-0 bg-[#FFFFFF] border-r border-[#E2E8F0] transition-all duration-200 overflow-hidden ${
-            sidebarOpen ? 'w-64' : 'w-0 border-r-0'
+          aria-label="Sidebar Navigation"
+          aria-hidden={!sidebarOpen}
+          className={`hidden lg:block shrink-0 bg-[#FFFFFF] border-r border-[#E2E8F0] sticky top-16 self-start h-[calc(100vh-4rem)] overflow-y-auto overflow-x-hidden transition-[width] duration-200 ${
+            sidebarOpen ? 'w-64' : 'w-0 border-r-0 pointer-events-none'
           }`}
         >
-          <div className="w-64 h-[calc(100vh-4rem)] sticky top-16">
-            {renderSidebarContent()}
+          <div className="w-64 min-h-full">
+            {renderSidebarContent(false)}
           </div>
         </aside>
 
@@ -483,15 +490,15 @@ export const PortalLayout: React.FC = () => {
               onClick={() => setMobileDrawerOpen(false)}
               className="fixed inset-0 bg-black/40 backdrop-blur-xs"
             />
-            <div className="relative w-64 max-w-[80vw] h-full bg-[#FFFFFF] border-r border-[#E2E8F0] shadow-2xl z-10 flex flex-col">
+            <div className="relative w-64 max-w-[80vw] h-full bg-[#FFFFFF] border-r border-[#E2E8F0] shadow-2xl z-10 flex flex-col overflow-y-auto">
               <button
                 onClick={() => setMobileDrawerOpen(false)}
                 aria-label="Close sidebar"
-                className="absolute top-3.5 right-3 w-8 h-8 rounded-lg flex items-center justify-center text-[#64748B] hover:bg-[#EDF2F5] cursor-pointer"
+                className="absolute top-3.5 right-3 z-20 w-8 h-8 rounded-lg flex items-center justify-center text-[#64748B] hover:bg-[#EDF2F5] cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
-              {renderSidebarContent()}
+              {renderSidebarContent(true)}
             </div>
           </div>
         )}

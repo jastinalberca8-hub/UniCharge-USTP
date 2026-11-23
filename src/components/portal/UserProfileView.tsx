@@ -143,11 +143,6 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({ onBackToDashbo
             View your institutional status, personal details, and upload a profile picture from your device.
           </p>
         </div>
-
-        <div className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/50 text-xs font-bold text-[#1E293B] self-start sm:self-auto">
-          <span className="w-2 h-2 rounded-full bg-[#5BC496] animate-pulse" />
-          <span>Account Active · {isAdmin ? 'Admin Role' : 'Student Role'}</span>
-        </div>
       </div>
 
       {feedback && (

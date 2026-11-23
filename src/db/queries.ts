@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { and, asc, desc, eq, gt, ilike, ne, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, ilike, lte, ne, or } from 'drizzle-orm';
 import { db, pool } from './index.ts';
 import {
   emailVerifications,
@@ -15,10 +15,21 @@ import {
   ALLOWED_USTP_COLLEGE_VALUES,
   isCourseValidForCollege,
 } from '../constants/colleges.ts';
+import {
+  UNICHARGE_STATION_CODE,
+  UNICHARGE_STATION_ID,
+  UNICHARGE_STATION_NAME,
+  formatCompartmentCode,
+  formatCompartmentLabel,
+  getCompartmentCategory,
+  normalizeServiceType,
+  resolvePricingTier,
+} from '../constants/pricing.ts';
 import type {
   ActiveSession,
+  AdminStationActivity,
+  AdminStationTransaction,
   KioskStation,
-  LockerSize,
   LockerSlot,
   LockerStatus,
   PendingUnlockToken,
@@ -74,21 +85,6 @@ async function ensureSchemaReady(): Promise<void> {
       profile_completed BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
-
-    ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS password_hash TEXT,
-      ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'student',
-      ADD COLUMN IF NOT EXISTS college TEXT NOT NULL DEFAULT 'College of Information Technology and Computing (CITC)',
-      ADD COLUMN IF NOT EXISTS degree TEXT NOT NULL DEFAULT 'BS Information Technology',
-      ADD COLUMN IF NOT EXISTS avatar TEXT NOT NULL DEFAULT '',
-      ADD COLUMN IF NOT EXISTS wallet_balance DOUBLE PRECISION NOT NULL DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS biometric_enabled BOOLEAN NOT NULL DEFAULT false,
-      ADD COLUMN IF NOT EXISTS push_notifications BOOLEAN NOT NULL DEFAULT true,
-      ADD COLUMN IF NOT EXISTS overcharge_alerts BOOLEAN NOT NULL DEFAULT true,
-      ADD COLUMN IF NOT EXISTS preferred_payment TEXT NOT NULL DEFAULT 'wallet',
-      ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false,
-      ADD COLUMN IF NOT EXISTS profile_completed BOOLEAN NOT NULL DEFAULT false,
-      ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
 
     CREATE TABLE IF NOT EXISTS email_verifications (
       id SERIAL PRIMARY KEY,
@@ -266,88 +262,128 @@ export async function ensureCatalogSeeded(): Promise<void> {
 
   catalogSeedPromise = (async () => {
     try {
-      await ensureSchemaReady();
-      for (const st of SEED_STATIONS) {
-      await db
-        .insert(stations)
-        .values({
-          id: st.id,
-          name: st.name,
-          campusCode: st.campusCode,
-          building: st.building,
-          floor: st.floor,
-          walkMinutes: st.walkMinutes,
-          distanceMeters: st.distanceMeters,
-          totalSlots: st.totalSlots,
-          online: st.online,
-          powerDrawWatts: st.powerDrawWatts,
-          mapX: st.mapCoords.x,
-          mapY: st.mapCoords.y,
-          lat: st.coordinates.lat,
-          lng: st.coordinates.lng,
-          image: st.image,
-          isPopular: Boolean(st.isPopular),
-        })
-        .onConflictDoNothing();
+      // In Cloud SQL runtime, SQL_USER has DML permissions on existing tables
+      // but lacks CREATE DDL permission on schema public. Check existence first.
+      const tableCheck = await pool.query<{ tbl: string | null }>(
+        "SELECT to_regclass('public.stations') AS tbl"
+      );
+      if (!tableCheck.rows[0]?.tbl) {
+        await ensureSchemaReady();
+      }
 
-      for (const slot of st.slots) {
+      // Remove legacy multi-building compartments & stations so only the single UniCharge Station exists
+      await db.delete(lockerSlots).where(ne(lockerSlots.stationId, UNICHARGE_STATION_ID));
+      await db.delete(stations).where(ne(stations.id, UNICHARGE_STATION_ID));
+
+      for (const st of SEED_STATIONS) {
         await db
-          .insert(lockerSlots)
+          .insert(stations)
           .values({
-            id: slot.id,
-            stationId: st.id,
-            slotNumber: slot.slotNumber,
-            size: slot.size,
-            status: slot.status,
-            chargingPower: slot.chargingPower,
-            currentTemp: slot.currentTemp,
-            isDoorOpen: slot.isDoorOpen,
-            isLocked: slot.isLocked,
+            id: st.id,
+            name: st.name,
+            campusCode: st.campusCode,
+            building: st.building,
+            floor: st.floor,
+            walkMinutes: st.walkMinutes,
+            distanceMeters: st.distanceMeters,
+            totalSlots: st.totalSlots,
+            online: st.online,
+            powerDrawWatts: st.powerDrawWatts,
+            mapX: st.mapCoords.x,
+            mapY: st.mapCoords.y,
+            lat: st.coordinates.lat,
+            lng: st.coordinates.lng,
+            image: st.image,
+            isPopular: Boolean(st.isPopular),
+          })
+          .onConflictDoUpdate({
+            target: stations.id,
+            set: {
+              name: st.name,
+              campusCode: st.campusCode,
+              building: st.building,
+              floor: st.floor,
+              walkMinutes: st.walkMinutes,
+              distanceMeters: st.distanceMeters,
+              totalSlots: st.totalSlots,
+              image: st.image,
+            },
+          });
+
+        for (const slot of st.slots) {
+          await db
+            .insert(lockerSlots)
+            .values({
+              id: slot.id,
+              stationId: st.id,
+              slotNumber: slot.slotNumber,
+              size: slot.category,
+              status: slot.status,
+              chargingPower: slot.chargingPower,
+              currentTemp: slot.currentTemp,
+              isDoorOpen: slot.isDoorOpen,
+              isLocked: slot.isLocked,
+            })
+            .onConflictDoUpdate({
+              target: lockerSlots.id,
+              set: {
+                slotNumber: slot.slotNumber,
+                size: slot.category,
+                chargingPower: slot.chargingPower,
+              },
+            });
+        }
+      }
+
+      for (const alert of SEED_SECURITY_ALERTS) {
+        await db
+          .insert(securityAlerts)
+          .values({
+            id: alert.id,
+            timestampLabel: alert.timestamp,
+            stationCode: alert.stationCode,
+            stationName: alert.stationName,
+            slotNumber: alert.slotNumber,
+            severity: alert.severity,
+            type: alert.type,
+            message: alert.message,
+            resolved: alert.resolved,
+          })
+          .onConflictDoUpdate({
+            target: securityAlerts.id,
+            set: {
+              stationCode: alert.stationCode,
+              stationName: alert.stationName,
+              slotNumber: alert.slotNumber,
+              type: alert.type,
+              message: alert.message,
+            },
+          });
+      }
+
+      for (const acct of DEFAULT_DB_ACCOUNTS) {
+        await db
+          .insert(users)
+          .values({
+            uid: acct.uid,
+            name: acct.name,
+            studentIdNumber: acct.studentIdNumber,
+            email: acct.email,
+            passwordHash: hashPassword(acct.passwordPlain),
+            role: acct.role,
+            college: acct.college,
+            degree: acct.degree,
+            avatar: acct.avatar,
+            walletBalance: acct.walletBalance,
+            biometricEnabled: acct.biometricEnabled,
+            pushNotifications: acct.pushNotifications,
+            overchargeAlerts: acct.overchargeAlerts,
+            preferredPayment: acct.preferredPayment,
+            emailVerified: true,
+            profileCompleted: true,
           })
           .onConflictDoNothing();
       }
-    }
-
-    for (const alert of SEED_SECURITY_ALERTS) {
-      await db
-        .insert(securityAlerts)
-        .values({
-          id: alert.id,
-          timestampLabel: alert.timestamp,
-          stationCode: alert.stationCode,
-          stationName: alert.stationName,
-          slotNumber: alert.slotNumber,
-          severity: alert.severity,
-          type: alert.type,
-          message: alert.message,
-          resolved: alert.resolved,
-        })
-        .onConflictDoNothing();
-    }
-
-    for (const acct of DEFAULT_DB_ACCOUNTS) {
-      await db
-        .insert(users)
-        .values({
-          uid: acct.uid,
-          name: acct.name,
-          studentIdNumber: acct.studentIdNumber,
-          email: acct.email,
-          passwordHash: hashPassword(acct.passwordPlain),
-          role: acct.role,
-          college: acct.college,
-          degree: acct.degree,
-          avatar: acct.avatar,
-          walletBalance: acct.walletBalance,
-          biometricEnabled: acct.biometricEnabled,
-          pushNotifications: acct.pushNotifications,
-          overchargeAlerts: acct.overchargeAlerts,
-          preferredPayment: acct.preferredPayment,
-          emailVerified: true,
-          profileCompleted: true,
-        })
-        .onConflictDoNothing();
-    }
 
       catalogSeeded = true;
     } catch (error) {
@@ -404,20 +440,55 @@ export async function getOrCreateUser(
       .from(users)
       .where(ilike(users.email, cleanEmail));
     if (existingByEmail[0]) {
-      const oldUid = existingByEmail[0].uid;
+      const existing = existingByEmail[0];
+      const oldUid = existing.uid;
       if (oldUid !== uid) {
-        await db
-          .update(sessions)
-          .set({ userUid: uid })
-          .where(eq(sessions.userUid, oldUid));
-        const linked = await db
-          .update(users)
-          .set({ uid, email: cleanEmail })
-          .where(eq(users.id, existingByEmail[0].id))
-          .returning();
-        return mapUserRow(linked[0]);
+        const migrated = await db.transaction(async (tx) => {
+          const tempEmail = `__migrating_${existing.id}_${Date.now()}@unicharge.invalid`;
+          await tx
+            .update(users)
+            .set({ email: tempEmail })
+            .where(eq(users.id, existing.id));
+
+          const [insertedUser] = await tx
+            .insert(users)
+            .values({
+              uid,
+              name: existing.name,
+              studentIdNumber: existing.studentIdNumber,
+              email: cleanEmail,
+              passwordHash: existing.passwordHash,
+              role: existing.role,
+              college: existing.college,
+              degree: existing.degree,
+              avatar: existing.avatar,
+              walletBalance: existing.walletBalance,
+              biometricEnabled: existing.biometricEnabled,
+              pushNotifications: existing.pushNotifications,
+              overchargeAlerts: existing.overchargeAlerts,
+              preferredPayment: existing.preferredPayment,
+              emailVerified: true,
+              profileCompleted: existing.profileCompleted,
+              createdAt: existing.createdAt,
+            })
+            .returning();
+
+          await tx
+            .update(sessions)
+            .set({ userUid: uid })
+            .where(eq(sessions.userUid, oldUid));
+
+          await tx
+            .update(lockerUnlockTokens)
+            .set({ userUid: uid })
+            .where(eq(lockerUnlockTokens.userUid, oldUid));
+
+          await tx.delete(users).where(eq(users.id, existing.id));
+          return insertedUser;
+        });
+        return mapUserRow(migrated);
       }
-      return mapUserRow(existingByEmail[0]);
+      return mapUserRow(existing);
     }
 
     const isAdminEmail = cleanEmail === 'admin@ustp.edu.ph';
@@ -1061,8 +1132,72 @@ export async function adminProvisionStaffDb(params: {
   }
 }
 
+async function releaseExpiredReservationsDb(): Promise<void> {
+  const now = new Date();
+  const expiredTokens = await db
+    .update(lockerUnlockTokens)
+    .set({ used: true })
+    .where(
+      and(
+        eq(lockerUnlockTokens.used, false),
+        lte(lockerUnlockTokens.expiresAt, now)
+      )
+    )
+    .returning();
+
+  if (expiredTokens.length === 0) return;
+
+  const seenSlots = new Set<string>();
+  for (const tok of expiredTokens) {
+    const key = `${tok.stationId}:${tok.slotNumber}`;
+    if (seenSlots.has(key)) continue;
+    seenSlots.add(key);
+
+    const activeOnSlot = await db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(
+        and(
+          eq(sessions.stationId, tok.stationId),
+          eq(sessions.slotNumber, tok.slotNumber),
+          eq(sessions.status, 'active')
+        )
+      )
+      .limit(1);
+
+    if (activeOnSlot.length > 0) continue;
+
+    const remainingToken = await db
+      .select({ id: lockerUnlockTokens.id })
+      .from(lockerUnlockTokens)
+      .where(
+        and(
+          eq(lockerUnlockTokens.stationId, tok.stationId),
+          eq(lockerUnlockTokens.slotNumber, tok.slotNumber),
+          eq(lockerUnlockTokens.used, false),
+          gt(lockerUnlockTokens.expiresAt, now)
+        )
+      )
+      .limit(1);
+
+    if (remainingToken.length > 0) continue;
+
+    await db
+      .update(lockerSlots)
+      .set({ status: 'available', isDoorOpen: false, isLocked: true })
+      .where(
+        and(
+          eq(lockerSlots.stationId, tok.stationId),
+          eq(lockerSlots.slotNumber, tok.slotNumber),
+          eq(lockerSlots.status, 'in_use')
+        )
+      );
+  }
+}
+
 export async function fetchStationsWithSlots(): Promise<KioskStation[]> {
   try {
+    await releaseExpiredReservationsDb();
     const stationRows = await db.select().from(stations).orderBy(asc(stations.id));
     const slotRows = await db
       .select()
@@ -1075,7 +1210,8 @@ export async function fetchStationsWithSlots(): Promise<KioskStation[]> {
         .map((s) => ({
           id: s.id,
           slotNumber: s.slotNumber,
-          size: (s.size as LockerSize) || 'S',
+          code: formatCompartmentCode(s.slotNumber),
+          category: getCompartmentCategory(s.slotNumber),
           status: (s.status as LockerStatus) || 'available',
           chargingPower: s.chargingPower,
           currentTemp: s.currentTemp,
@@ -1155,8 +1291,13 @@ export async function fetchUserSessionState(userUid: string): Promise<{
           stationName: activeRow.stationName,
           building: activeRow.building,
           slotNumber: activeRow.slotNumber,
-          serviceType: (activeRow.serviceType as ServiceType) || 'both',
-          compartmentSize: (activeRow.compartmentSize as LockerSize) || 'S',
+          serviceType: normalizeServiceType(activeRow.serviceType, activeRow.slotNumber),
+          pricingTier: resolvePricingTier({
+            tierId: activeRow.compartmentSize,
+            serviceType: activeRow.serviceType,
+            durationMinutes: activeRow.durationMinutes,
+            slotNumber: activeRow.slotNumber,
+          }).name,
           startTime: activeRow.startTimeMs,
           durationMinutes: activeRow.durationMinutes,
           remainingSeconds: activeRow.remainingSeconds,
@@ -1182,8 +1323,13 @@ export async function fetchUserSessionState(userUid: string): Promise<{
         slotNumber: r.slotNumber,
         durationMinutes: r.durationMinutes,
         totalFee: r.totalFee,
-        serviceType: (r.serviceType as ServiceType) || 'both',
-        compartmentSize: (r.compartmentSize as LockerSize) || 'S',
+        serviceType: normalizeServiceType(r.serviceType, r.slotNumber),
+        pricingTier: resolvePricingTier({
+          tierId: r.compartmentSize,
+          serviceType: r.serviceType,
+          durationMinutes: r.durationMinutes,
+          slotNumber: r.slotNumber,
+        }).name,
         status: 'Completed',
       }));
 
@@ -1191,6 +1337,110 @@ export async function fetchUserSessionState(userUid: string): Promise<{
   } catch (error) {
     console.error('Database user session query failed:', error);
     throw new Error('Failed to load user sessions.', { cause: error });
+  }
+}
+
+export async function fetchAdminStationActivityDb(): Promise<AdminStationActivity> {
+  try {
+    const now = new Date();
+    const [allUsers, recentSessionRows, activeTokenRows] = await Promise.all([
+      db.select().from(users),
+      db.select().from(sessions).orderBy(desc(sessions.createdAt)).limit(25),
+      db
+        .select()
+        .from(lockerUnlockTokens)
+        .where(
+          and(
+            eq(lockerUnlockTokens.used, false),
+            gt(lockerUnlockTokens.expiresAt, now)
+          )
+        )
+        .orderBy(desc(lockerUnlockTokens.createdAt)),
+    ]);
+
+    const userByUid = new Map(allUsers.map((u) => [u.uid, u]));
+
+    const activeSessions: AdminStationTransaction[] = recentSessionRows
+      .filter((r) => r.status === 'active')
+      .map((r) => {
+        const owner = userByUid.get(r.userUid);
+        return {
+          id: r.sessionId,
+          kind: 'active',
+          userUid: r.userUid,
+          userName: owner?.name || 'USTP Student',
+          studentIdNumber: owner?.studentIdNumber || '—',
+          slotNumber: r.slotNumber,
+          serviceType: normalizeServiceType(r.serviceType, r.slotNumber),
+          pricingTier: resolvePricingTier({
+            tierId: r.compartmentSize,
+            serviceType: r.serviceType,
+            durationMinutes: r.durationMinutes,
+            slotNumber: r.slotNumber,
+          }).name,
+          totalFee: Number(r.totalFee),
+          createdAtMs: r.startTimeMs || r.createdAt.getTime(),
+        };
+      });
+
+    const pendingReservations: AdminStationTransaction[] = activeTokenRows.map((t) => {
+      const owner = userByUid.get(t.userUid);
+      return {
+        id: t.tokenId,
+        kind: 'reserved',
+        userUid: t.userUid,
+        userName: owner?.name || 'USTP Student',
+        studentIdNumber: owner?.studentIdNumber || '—',
+        slotNumber: t.slotNumber,
+        serviceType: normalizeServiceType(t.serviceType, t.slotNumber),
+        pricingTier: resolvePricingTier({
+          tierId: t.compartmentSize,
+          serviceType: t.serviceType,
+          durationMinutes: t.durationMinutes,
+          slotNumber: t.slotNumber,
+        }).name,
+        totalFee: Number(t.totalFee),
+        paymentMethod: t.paymentMethod,
+        createdAtMs: t.createdAt.getTime(),
+        expiresAtMs: t.expiresAt.getTime(),
+      };
+    });
+
+    const completedAndActiveTransactions: AdminStationTransaction[] = recentSessionRows.map(
+      (r) => {
+        const owner = userByUid.get(r.userUid);
+        return {
+          id: r.sessionId,
+          kind: r.status === 'active' ? 'active' : 'completed',
+          userUid: r.userUid,
+          userName: owner?.name || 'USTP Student',
+          studentIdNumber: owner?.studentIdNumber || '—',
+          slotNumber: r.slotNumber,
+          serviceType: normalizeServiceType(r.serviceType, r.slotNumber),
+          pricingTier: resolvePricingTier({
+            tierId: r.compartmentSize,
+            serviceType: r.serviceType,
+            durationMinutes: r.durationMinutes,
+            slotNumber: r.slotNumber,
+          }).name,
+          totalFee: Number(r.totalFee),
+          createdAtMs: r.startTimeMs || r.createdAt.getTime(),
+        };
+      }
+    );
+
+    const recentTransactions = [...pendingReservations, ...completedAndActiveTransactions]
+      .sort((a, b) => b.createdAtMs - a.createdAtMs)
+      .slice(0, 15);
+
+    return {
+      activeSessions,
+      pendingReservations,
+      recentTransactions,
+    };
+  } catch (error) {
+    console.error('Database admin station activity failed:', error);
+    return { activeSessions: [], pendingReservations: [], recentTransactions: [] };
   }
 }
 
@@ -1208,10 +1458,15 @@ export async function getBootstrapData(
   ]);
 
   let allUsers: UserAccount[] = [user];
+  let stationActivity: AdminStationActivity | undefined;
   if (user.role === 'admin') {
     try {
-      const rows = await db.select().from(users).orderBy(desc(users.createdAt));
+      const [rows, activity] = await Promise.all([
+        db.select().from(users).orderBy(desc(users.createdAt)),
+        fetchAdminStationActivityDb(),
+      ]);
       allUsers = rows.map(mapUserRow);
+      stationActivity = activity;
     } catch (error) {
       console.error('Database users list failed:', error);
       throw new Error('Failed to load registered accounts.', { cause: error });
@@ -1239,37 +1494,88 @@ export async function getBootstrapData(
     activeSession: userSessions.activeSession,
     sessionHistory: userSessions.history,
     pendingUnlockToken: pendingRows[0] ? mapUnlockTokenRow(pendingRows[0]) : null,
+    ...(stationActivity ? { stationActivity } : {}),
+  };
+}
+
+export async function getStationSyncStateDb(uid: string, email: string) {
+  await ensureCatalogSeeded();
+  const existingRows = await db.select().from(users).where(eq(users.uid, uid));
+  const actor = existingRows[0]
+    ? mapUserRow(existingRows[0])
+    : await getOrCreateUser(uid, email);
+
+  const [stationList, alertList, userSessions] = await Promise.all([
+    fetchStationsWithSlots(),
+    fetchSecurityAlerts(),
+    fetchUserSessionState(actor.id),
+  ]);
+
+  let allUsers: UserAccount[] | undefined;
+  let stationActivity: AdminStationActivity | undefined;
+  if (actor.role === 'admin') {
+    const [rows, activity] = await Promise.all([
+      db.select().from(users).orderBy(desc(users.createdAt)),
+      fetchAdminStationActivityDb(),
+    ]);
+    allUsers = rows.map(mapUserRow);
+    stationActivity = activity;
+  }
+
+  const pendingRows = await db
+    .select()
+    .from(lockerUnlockTokens)
+    .where(
+      and(
+        eq(lockerUnlockTokens.userUid, actor.id),
+        eq(lockerUnlockTokens.used, false),
+        gt(lockerUnlockTokens.expiresAt, new Date())
+      )
+    )
+    .orderBy(desc(lockerUnlockTokens.createdAt))
+    .limit(1);
+
+  return {
+    user: actor,
+    stations: stationList,
+    securityAlerts: alertList,
+    activeSession: userSessions.activeSession,
+    sessionHistory: userSessions.history,
+    pendingUnlockToken: pendingRows[0] ? mapUnlockTokenRow(pendingRows[0]) : null,
+    ...(allUsers ? { users: allUsers } : {}),
+    ...(stationActivity ? { stationActivity } : {}),
   };
 }
 
 const UNLOCK_TOKEN_TTL_MS = 5 * 60 * 1000;
-const LOCKER_HOURLY_RATES: Record<LockerSize, number> = {
-  S: 15,
-  M: 20,
-  L: 30,
-};
 
 export function calculateLockerFee(
-  size: LockerSize,
-  durationMinutes: number,
-  service: ServiceType
+  tierOrService: string,
+  durationMinutes: number
 ): number {
-  const hourly = LOCKER_HOURLY_RATES[size] || 15;
-  const hours = durationMinutes / 60;
-  const baseFee = hourly * hours;
-  const addOn = service === 'both' ? 5 : 0;
-  return Math.round(baseFee + addOn);
+  return resolvePricingTier({
+    tierId: tierOrService,
+    serviceType: tierOrService,
+    durationMinutes,
+  }).fee;
 }
 
 function mapUnlockTokenRow(row: typeof lockerUnlockTokens.$inferSelect): PendingUnlockToken {
+  const tier = resolvePricingTier({
+    tierId: row.compartmentSize,
+    serviceType: row.serviceType,
+    durationMinutes: row.durationMinutes,
+    slotNumber: row.slotNumber,
+  });
+
   return {
     tokenId: row.tokenId,
     stationId: row.stationId,
     stationName: row.stationName,
     stationCode: row.stationCode,
     slotNumber: row.slotNumber,
-    serviceType: (row.serviceType as ServiceType) || 'both',
-    compartmentSize: (row.compartmentSize as LockerSize) || 'S',
+    serviceType: normalizeServiceType(row.serviceType, row.slotNumber),
+    pricingTier: tier.name,
     durationMinutes: row.durationMinutes,
     totalFee: Number(row.totalFee),
     paymentMethod:
@@ -1287,25 +1593,31 @@ function mapUnlockTokenRow(row: typeof lockerUnlockTokens.$inferSelect): Pending
 
 export async function createUnlockTokenDb(params: {
   uid: string;
-  stationId: string;
+  stationId?: string;
   slotNumber?: number;
-  serviceType: ServiceType;
-  compartmentSize: LockerSize;
-  durationMinutes: number;
+  serviceType: ServiceType | string;
+  pricingTier?: string;
+  durationMinutes?: number;
   paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash';
-}): Promise<{ token: PendingUnlockToken; userEmail: string; userName: string }> {
+}): Promise<{
+  token: PendingUnlockToken;
+  userEmail: string;
+  userName: string;
+  stations: KioskStation[];
+}> {
   await ensureCatalogSeeded();
-  const durationMinutes = Number(params.durationMinutes);
-  if (!Number.isFinite(durationMinutes) || durationMinutes < 30 || durationMinutes > 240) {
-    throw new AuthValidationError('Duration must be between 30 and 240 minutes.');
-  }
+  await releaseExpiredReservationsDb();
 
-  const validService: ServiceType =
-    params.serviceType === 'charging' ||
-    params.serviceType === 'storage' ||
-    params.serviceType === 'both'
-      ? params.serviceType
-      : 'both';
+  const resolvedTier = resolvePricingTier({
+    tierId: params.pricingTier,
+    serviceType: params.serviceType,
+    durationMinutes: params.durationMinutes,
+    slotNumber: params.slotNumber,
+  });
+
+  const validService: ServiceType = resolvedTier.serviceType;
+  const durationMinutes = resolvedTier.durationMinutes;
+  const totalFee = resolvedTier.fee;
 
   const validPayment: 'wallet' | 'gcash' | 'maya' | 'cash' =
     params.paymentMethod === 'gcash' ||
@@ -1320,35 +1632,17 @@ export async function createUnlockTokenDb(params: {
     throw new AuthValidationError('User account not found.');
   }
 
+  const targetStationId = params.stationId?.trim() || UNICHARGE_STATION_ID;
   const stationRows = await db
     .select()
     .from(stations)
-    .where(eq(stations.id, params.stationId));
-  const station = stationRows[0];
+    .where(eq(stations.id, targetStationId));
+  const station =
+    stationRows[0] ||
+    (await db.select().from(stations).where(eq(stations.id, UNICHARGE_STATION_ID)))[0];
   if (!station) {
-    throw new AuthValidationError('Selected kiosk station was not found.');
+    throw new AuthValidationError('UniCharge station was not found.');
   }
-
-  const slotRows = await db
-    .select()
-    .from(lockerSlots)
-    .where(eq(lockerSlots.stationId, station.id))
-    .orderBy(asc(lockerSlots.slotNumber));
-
-  const requestedSlot =
-    typeof params.slotNumber === 'number'
-      ? slotRows.find((s) => s.slotNumber === params.slotNumber)
-      : slotRows.find((s) => s.status === 'available');
-
-  if (!requestedSlot || requestedSlot.status !== 'available') {
-    throw new AuthValidationError(
-      'Selected compartment is no longer available. Please choose a free compartment.'
-    );
-  }
-
-  const compartmentSize: LockerSize =
-    (requestedSlot.size as LockerSize) || params.compartmentSize || 'S';
-  const totalFee = calculateLockerFee(compartmentSize, durationMinutes, validService);
 
   if (validPayment === 'wallet' && Number(actor.walletBalance) < totalFee) {
     throw new AuthValidationError(
@@ -1358,47 +1652,123 @@ export async function createUnlockTokenDb(params: {
     );
   }
 
-  // Invalidate any prior unused tokens for this student so only one active pass remains
-  await db
-    .update(lockerUnlockTokens)
-    .set({ used: true })
-    .where(
-      and(
-        eq(lockerUnlockTokens.userUid, actor.uid),
-        eq(lockerUnlockTokens.used, false)
+  const insertedToken = await db.transaction(async (tx) => {
+    // Release any prior unused reservation held by this student first
+    const priorTokens = await tx
+      .update(lockerUnlockTokens)
+      .set({ used: true })
+      .where(
+        and(
+          eq(lockerUnlockTokens.userUid, actor.uid),
+          eq(lockerUnlockTokens.used, false)
+        )
       )
-    );
+      .returning();
 
-  const pinCode = String(crypto.randomInt(100000, 1000000));
-  const tokenId = `TOK-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-  const qrPayload = `UNICHARGE|${station.campusCode}|SLOT-${requestedSlot.slotNumber}|PIN-${pinCode}|${tokenId}`;
-  const expiresAt = new Date(Date.now() + UNLOCK_TOKEN_TTL_MS);
+    for (const prev of priorTokens) {
+      const activeOnSlot = await tx
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(
+          and(
+            eq(sessions.stationId, prev.stationId),
+            eq(sessions.slotNumber, prev.slotNumber),
+            eq(sessions.status, 'active')
+          )
+        )
+        .limit(1);
 
-  const inserted = await db
-    .insert(lockerUnlockTokens)
-    .values({
-      tokenId,
-      userUid: actor.uid,
-      stationId: station.id,
-      stationName: station.name,
-      stationCode: station.campusCode,
-      slotNumber: requestedSlot.slotNumber,
-      serviceType: validService,
-      compartmentSize,
-      durationMinutes,
-      totalFee,
-      paymentMethod: validPayment,
-      pinCode,
-      qrPayload,
-      used: false,
-      expiresAt,
-    })
-    .returning();
+      if (activeOnSlot.length === 0) {
+        await tx
+          .update(lockerSlots)
+          .set({ status: 'available', isDoorOpen: false, isLocked: true })
+          .where(
+            and(
+              eq(lockerSlots.stationId, prev.stationId),
+              eq(lockerSlots.slotNumber, prev.slotNumber),
+              eq(lockerSlots.status, 'in_use')
+            )
+          );
+      }
+    }
+
+    const slotRows = await tx
+      .select()
+      .from(lockerSlots)
+      .where(eq(lockerSlots.stationId, station.id))
+      .orderBy(asc(lockerSlots.slotNumber));
+
+    const requestedSlot =
+      typeof params.slotNumber === 'number'
+        ? slotRows.find((s) => s.slotNumber === params.slotNumber)
+        : slotRows.find(
+            (s) =>
+              s.status === 'available' &&
+              getCompartmentCategory(s.slotNumber) === validService
+          );
+
+    if (!requestedSlot || requestedSlot.status !== 'available') {
+      throw new AuthValidationError(
+        'Selected compartment is no longer available. Please choose a free compartment.'
+      );
+    }
+
+    if (getCompartmentCategory(requestedSlot.slotNumber) !== validService) {
+      throw new AuthValidationError(
+        `${formatCompartmentLabel(requestedSlot.slotNumber)} is reserved for ${getCompartmentCategory(
+          requestedSlot.slotNumber
+        )} only.`
+      );
+    }
+
+    // Reserve compartment as busy (in_use) immediately so Admin & other students see it
+    await tx
+      .update(lockerSlots)
+      .set({ status: 'in_use', isDoorOpen: false, isLocked: true })
+      .where(
+        and(
+          eq(lockerSlots.stationId, station.id),
+          eq(lockerSlots.slotNumber, requestedSlot.slotNumber)
+        )
+      );
+
+    const pinCode = String(crypto.randomInt(100000, 1000000));
+    const tokenId = `TOK-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    const compartmentCode = formatCompartmentCode(requestedSlot.slotNumber);
+    const qrPayload = `UNICHARGE|${station.campusCode}|SLOT-${compartmentCode}|PIN-${pinCode}|${tokenId}`;
+    const expiresAt = new Date(Date.now() + UNLOCK_TOKEN_TTL_MS);
+
+    const [created] = await tx
+      .insert(lockerUnlockTokens)
+      .values({
+        tokenId,
+        userUid: actor.uid,
+        stationId: station.id,
+        stationName: station.name,
+        stationCode: station.campusCode,
+        slotNumber: requestedSlot.slotNumber,
+        serviceType: validService,
+        compartmentSize: resolvedTier.name,
+        durationMinutes,
+        totalFee,
+        paymentMethod: validPayment,
+        pinCode,
+        qrPayload,
+        used: false,
+        expiresAt,
+      })
+      .returning();
+
+    return created;
+  });
+
+  const updatedStations = await fetchStationsWithSlots();
 
   return {
-    token: mapUnlockTokenRow(inserted[0]),
+    token: mapUnlockTokenRow(insertedToken),
     userEmail: actor.email,
     userName: actor.name,
+    stations: updatedStations,
   };
 }
 
@@ -1440,17 +1810,52 @@ export async function getUnlockTokenByIdDb(
   };
 }
 
-export async function cancelUnlockTokenDb(uid: string, tokenId: string): Promise<void> {
-  await db
-    .update(lockerUnlockTokens)
-    .set({ used: true })
-    .where(
-      and(
-        eq(lockerUnlockTokens.userUid, uid),
-        eq(lockerUnlockTokens.tokenId, tokenId.trim()),
-        eq(lockerUnlockTokens.used, false)
+export async function cancelUnlockTokenDb(
+  uid: string,
+  tokenId: string
+): Promise<KioskStation[]> {
+  await db.transaction(async (tx) => {
+    const cancelled = await tx
+      .update(lockerUnlockTokens)
+      .set({ used: true })
+      .where(
+        and(
+          eq(lockerUnlockTokens.userUid, uid),
+          eq(lockerUnlockTokens.tokenId, tokenId.trim()),
+          eq(lockerUnlockTokens.used, false)
+        )
       )
-    );
+      .returning();
+
+    for (const tok of cancelled) {
+      const activeOnSlot = await tx
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(
+          and(
+            eq(sessions.stationId, tok.stationId),
+            eq(sessions.slotNumber, tok.slotNumber),
+            eq(sessions.status, 'active')
+          )
+        )
+        .limit(1);
+
+      if (activeOnSlot.length === 0) {
+        await tx
+          .update(lockerSlots)
+          .set({ status: 'available', isDoorOpen: false, isLocked: true })
+          .where(
+            and(
+              eq(lockerSlots.stationId, tok.stationId),
+              eq(lockerSlots.slotNumber, tok.slotNumber),
+              eq(lockerSlots.status, 'in_use')
+            )
+          );
+      }
+    }
+  });
+
+  return fetchStationsWithSlots();
 }
 
 export async function verifyAndConsumeUnlockTokenDb(params: {
@@ -1570,9 +1975,27 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
         )
       );
     const targetSlot = slotRows[0];
-    if (!targetSlot || targetSlot.status !== 'available') {
+    if (!targetSlot || targetSlot.status === 'maintenance') {
       throw new AuthValidationError(
-        `Compartment #${tokenRow.slotNumber} is no longer available. Please choose another free compartment.`
+        `${formatCompartmentLabel(tokenRow.slotNumber)} is unavailable or under maintenance.`
+      );
+    }
+
+    const activeSessionsOnSlot = await tx
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(
+        and(
+          eq(sessions.stationId, tokenRow.stationId),
+          eq(sessions.slotNumber, tokenRow.slotNumber),
+          eq(sessions.status, 'active')
+        )
+      )
+      .limit(1);
+
+    if (activeSessionsOnSlot.length > 0) {
+      throw new AuthValidationError(
+        `${formatCompartmentLabel(tokenRow.slotNumber)} already has an active session.`
       );
     }
 
@@ -1591,11 +2014,13 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
       .where(eq(stations.id, tokenRow.stationId));
     const targetStation = stationRows[0];
 
-    const computedFee = calculateLockerFee(
-      (tokenRow.compartmentSize as LockerSize) || 'S',
-      tokenRow.durationMinutes,
-      (tokenRow.serviceType as ServiceType) || 'both'
-    );
+    const resolvedTier = resolvePricingTier({
+      tierId: tokenRow.compartmentSize,
+      serviceType: tokenRow.serviceType,
+      durationMinutes: tokenRow.durationMinutes,
+      slotNumber: tokenRow.slotNumber,
+    });
+    const computedFee = resolvedTier.fee;
 
     let updatedOwner = owner;
     if (tokenRow.paymentMethod === 'wallet') {
@@ -1632,15 +2057,15 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
       stationName: tokenRow.stationName,
       building: targetStation?.building || tokenRow.stationName,
       slotNumber: tokenRow.slotNumber,
-      serviceType: (tokenRow.serviceType as ServiceType) || 'both',
-      compartmentSize: (tokenRow.compartmentSize as LockerSize) || 'S',
+      serviceType: resolvedTier.serviceType,
+      pricingTier: resolvedTier.name,
       startTime: nowMs,
-      durationMinutes: tokenRow.durationMinutes,
-      remainingSeconds: tokenRow.durationMinutes * 60,
+      durationMinutes: resolvedTier.durationMinutes,
+      remainingSeconds: resolvedTier.durationMinutes * 60,
       totalFee: computedFee,
       batteryInitial: 38,
       batteryCurrent: 38,
-      chargingRateWatts: tokenRow.serviceType === 'storage' ? 0 : 58.4,
+      chargingRateWatts: resolvedTier.serviceType === 'storage' ? 0 : 58.4,
       lockerTemperature: 28.6,
       isOverchargeProtectionActive: true,
       isTamperAlertArmed: true,
@@ -1656,7 +2081,7 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
       building: newSession.building,
       slotNumber: newSession.slotNumber,
       serviceType: newSession.serviceType,
-      compartmentSize: newSession.compartmentSize,
+      compartmentSize: newSession.pricingTier,
       startTimeMs: newSession.startTime,
       durationMinutes: newSession.durationMinutes,
       remainingSeconds: newSession.remainingSeconds,
@@ -1680,7 +2105,9 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
     user: mapUserRow(result.updatedOwner),
     session: result.newSession,
     stations: updatedStations,
-    message: `Kiosk Verified! Compartment #${result.newSession.slotNumber} Solenoid Unlatched at ${result.newSession.stationName}.`,
+    message: `Kiosk Verified! ${formatCompartmentLabel(
+      result.newSession.slotNumber
+    )} Solenoid Unlatched at ${result.newSession.stationName}.`,
   };
 }
 
@@ -1774,18 +2201,26 @@ export async function startSessionDb(params: {
   uid: string;
   session: ActiveSession;
   deductWalletAmount: number;
-}): Promise<{ user: UserAccount; session: ActiveSession }> {
+}): Promise<{ user: UserAccount; session: ActiveSession; stations: KioskStation[] }> {
   try {
     const existingUser = await db.select().from(users).where(eq(users.uid, params.uid));
     if (!existingUser[0]) {
       throw new Error('User account not found.');
     }
 
+    const resolvedTier = resolvePricingTier({
+      tierId: params.session.pricingTier,
+      serviceType: params.session.serviceType,
+      durationMinutes: params.session.durationMinutes,
+      slotNumber: params.session.slotNumber,
+    });
+
     let finalUser = existingUser[0];
     if (params.deductWalletAmount > 0) {
+      const feeToDeduct = resolvedTier.fee;
       const nextBalance = Math.max(
         0,
-        Number(existingUser[0].walletBalance) - params.deductWalletAmount
+        Number(existingUser[0].walletBalance) - feeToDeduct
       );
       const updatedUser = await db
         .update(users)
@@ -1812,15 +2247,15 @@ export async function startSessionDb(params: {
       stationName: params.session.stationName,
       building: params.session.building,
       slotNumber: params.session.slotNumber,
-      serviceType: params.session.serviceType,
-      compartmentSize: params.session.compartmentSize,
+      serviceType: resolvedTier.serviceType,
+      compartmentSize: resolvedTier.name,
       startTimeMs: params.session.startTime,
-      durationMinutes: params.session.durationMinutes,
-      remainingSeconds: params.session.remainingSeconds,
-      totalFee: params.session.totalFee,
+      durationMinutes: resolvedTier.durationMinutes,
+      remainingSeconds: resolvedTier.durationMinutes * 60,
+      totalFee: resolvedTier.fee,
       batteryInitial: params.session.batteryInitial,
       batteryCurrent: params.session.batteryCurrent,
-      chargingRateWatts: params.session.chargingRateWatts,
+      chargingRateWatts: resolvedTier.serviceType === 'storage' ? 0 : params.session.chargingRateWatts,
       lockerTemperature: params.session.lockerTemperature,
       isOverchargeProtectionActive: params.session.isOverchargeProtectionActive,
       isTamperAlertArmed: params.session.isTamperAlertArmed,
@@ -1828,7 +2263,8 @@ export async function startSessionDb(params: {
       qrVerificationCode: params.session.qrVerificationCode,
     });
 
-    return { user: mapUserRow(finalUser), session: params.session };
+    const updatedStations = await fetchStationsWithSlots();
+    return { user: mapUserRow(finalUser), session: params.session, stations: updatedStations };
   } catch (error) {
     console.error('Database start session failed:', error);
     throw new Error('Failed to start locker session.', { cause: error });
@@ -1842,7 +2278,7 @@ export async function endSessionDb(params: {
   slotNumber: number;
   receiptNumber: string;
   dateLabel: string;
-}): Promise<void> {
+}): Promise<KioskStation[]> {
   try {
     await db
       .update(sessions)
@@ -1868,10 +2304,109 @@ export async function endSessionDb(params: {
           eq(lockerSlots.slotNumber, params.slotNumber)
         )
       );
+
+    return fetchStationsWithSlots();
   } catch (error) {
     console.error('Database end session failed:', error);
     throw new Error('Failed to end locker session.', { cause: error });
   }
+}
+
+export async function updateKioskDoorStateDb(params: {
+  uid: string;
+  role: UserRole;
+  stationId: string;
+  slotNumber: number;
+  isDoorOpen: boolean;
+}): Promise<KioskStation[]> {
+  const targetStationId = params.stationId?.trim() || UNICHARGE_STATION_ID;
+  if (params.role !== 'admin') {
+    const ownedSession = await db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(
+        and(
+          eq(sessions.userUid, params.uid),
+          eq(sessions.stationId, targetStationId),
+          eq(sessions.slotNumber, params.slotNumber)
+        )
+      )
+      .limit(1);
+
+    const ownedToken = await db
+      .select({ id: lockerUnlockTokens.id })
+      .from(lockerUnlockTokens)
+      .where(
+        and(
+          eq(lockerUnlockTokens.userUid, params.uid),
+          eq(lockerUnlockTokens.stationId, targetStationId),
+          eq(lockerUnlockTokens.slotNumber, params.slotNumber)
+        )
+      )
+      .limit(1);
+
+    if (ownedSession.length === 0 && ownedToken.length === 0) {
+      throw new AuthValidationError('You are not authorized to operate this compartment latch.');
+    }
+  }
+
+  await db
+    .update(lockerSlots)
+    .set({
+      isDoorOpen: params.isDoorOpen,
+      isLocked: !params.isDoorOpen,
+    })
+    .where(
+      and(
+        eq(lockerSlots.stationId, targetStationId),
+        eq(lockerSlots.slotNumber, params.slotNumber)
+      )
+    );
+
+  return fetchStationsWithSlots();
+}
+
+export async function recordTamperAlertDb(params: {
+  uid: string;
+  stationId?: string;
+  slotNumber: number;
+}): Promise<{ stations: KioskStation[]; securityAlerts: SecurityAlert[] }> {
+  const targetStationId = params.stationId?.trim() || UNICHARGE_STATION_ID;
+  const stationRows = await db
+    .select()
+    .from(stations)
+    .where(eq(stations.id, targetStationId));
+  const station = stationRows[0];
+
+  await db
+    .update(lockerSlots)
+    .set({ isDoorOpen: true, isLocked: false })
+    .where(
+      and(
+        eq(lockerSlots.stationId, targetStationId),
+        eq(lockerSlots.slotNumber, params.slotNumber)
+      )
+    );
+
+  await db.insert(securityAlerts).values({
+    id: `alt-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+    timestampLabel: 'Just now',
+    stationCode: station?.campusCode || UNICHARGE_STATION_CODE,
+    stationName: station?.name || UNICHARGE_STATION_NAME,
+    slotNumber: params.slotNumber,
+    severity: 'critical',
+    type: 'Tamper Vibration',
+    message: `Unexpected door opening detected on ${formatCompartmentLabel(
+      params.slotNumber
+    )} without QR/PIN retrieval authorization.`,
+    resolved: false,
+  });
+
+  const [updatedStations, updatedAlerts] = await Promise.all([
+    fetchStationsWithSlots(),
+    fetchSecurityAlerts(),
+  ]);
+  return { stations: updatedStations, securityAlerts: updatedAlerts };
 }
 
 export async function adminUpdateSlotDb(params: {
@@ -1880,33 +2415,67 @@ export async function adminUpdateSlotDb(params: {
   status: LockerStatus;
   isDoorOpen?: boolean;
   isLocked?: boolean;
-}): Promise<void> {
+}): Promise<KioskStation[]> {
   try {
-    await db
-      .update(lockerSlots)
-      .set({
-        status: params.status,
-        ...(params.isDoorOpen !== undefined ? { isDoorOpen: params.isDoorOpen } : {}),
-        ...(params.isLocked !== undefined ? { isLocked: params.isLocked } : {}),
-      })
-      .where(
-        and(
-          eq(lockerSlots.stationId, params.stationId),
-          eq(lockerSlots.slotNumber, params.slotNumber)
-        )
-      );
+    await db.transaction(async (tx) => {
+      await tx
+        .update(lockerSlots)
+        .set({
+          status: params.status,
+          ...(params.isDoorOpen !== undefined ? { isDoorOpen: params.isDoorOpen } : {}),
+          ...(params.isLocked !== undefined ? { isLocked: params.isLocked } : {}),
+        })
+        .where(
+          and(
+            eq(lockerSlots.stationId, params.stationId),
+            eq(lockerSlots.slotNumber, params.slotNumber)
+          )
+        );
+
+      if (params.status === 'available') {
+        await tx
+          .update(sessions)
+          .set({
+            status: 'completed',
+            remainingSeconds: 0,
+            receiptNumber: 'ADMIN-OVERRIDE',
+            dateLabel: 'Admin Unlocked',
+          })
+          .where(
+            and(
+              eq(sessions.stationId, params.stationId),
+              eq(sessions.slotNumber, params.slotNumber),
+              eq(sessions.status, 'active')
+            )
+          );
+
+        await tx
+          .update(lockerUnlockTokens)
+          .set({ used: true })
+          .where(
+            and(
+              eq(lockerUnlockTokens.stationId, params.stationId),
+              eq(lockerUnlockTokens.slotNumber, params.slotNumber),
+              eq(lockerUnlockTokens.used, false)
+            )
+          );
+      }
+    });
+
+    return fetchStationsWithSlots();
   } catch (error) {
     console.error('Database admin slot update failed:', error);
     throw new Error('Failed to update compartment status.', { cause: error });
   }
 }
 
-export async function adminResolveAlertDb(alertId: string): Promise<void> {
+export async function adminResolveAlertDb(alertId: string): Promise<SecurityAlert[]> {
   try {
     await db
       .update(securityAlerts)
       .set({ resolved: true })
       .where(eq(securityAlerts.id, alertId));
+    return fetchSecurityAlerts();
   } catch (error) {
     console.error('Database resolve alert failed:', error);
     throw new Error('Failed to resolve security alert.', { cause: error });

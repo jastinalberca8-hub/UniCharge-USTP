@@ -136,9 +136,9 @@ export async function createFirestoreNotification(
   const payload = {
     userUid: sanitizeId(fbUser.uid, fbUser.uid, 128),
     sessionId: sanitizeId(input.sessionId, `SES_${Date.now()}`, 64),
-    stationId: sanitizeId(input.stationId, 'station-citc-01', 64),
-    stationCode: sanitizeId(input.stationCode, 'USTP-CITC-K01', 32),
-    stationName: truncateText(input.stationName, 'USTP Smart Kiosk', 120),
+    stationId: sanitizeId(input.stationId, 'unicharge-station-01', 64),
+    stationCode: sanitizeId(input.stationCode, 'USTP-UNICHARGE-01', 32),
+    stationName: truncateText(input.stationName, 'UniCharge Station', 120),
     slotNumber,
     type: input.type,
     severity: input.severity,

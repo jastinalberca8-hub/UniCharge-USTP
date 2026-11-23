@@ -8,11 +8,12 @@ import {
   SessionHistoryItem,
   ActiveSession,
   ServiceType,
-  LockerSize,
+  PricingTier,
   LockerSlot,
   SecurityAlert,
   PendingUnlockToken,
   DashboardNotification,
+  AdminStationActivity,
 } from '../types';
 import {
   SEEDED_USERS,
@@ -21,8 +22,17 @@ import {
   INITIAL_SAMPLE_SESSION,
   INITIAL_HISTORY,
   INITIAL_SECURITY_ALERTS,
-  PRICING_RATES,
 } from '../data/mockData';
+import {
+  PRICING_TIERS,
+  UNICHARGE_STATION_CODE,
+  UNICHARGE_STATION_ID,
+  UNICHARGE_STATION_NAME,
+  formatCompartmentCode,
+  formatCompartmentLabel,
+  getDefaultTierForService,
+  resolvePricingTier,
+} from '../constants/pricing';
 import { sound } from '../utils/audio';
 import {
   createFirestoreNotification,
@@ -69,13 +79,14 @@ interface UniChargeContextType {
   selectedStation: KioskStation;
   selectedSlot: LockerSlot | null;
   selectedService: ServiceType;
-  selectedSize: LockerSize;
+  selectedTier: PricingTier;
   selectedDuration: number;
   activeSession: ActiveSession | null;
   pendingUnlockToken: PendingUnlockToken | null;
   pendingSecondsLeft: number;
   sessionHistory: SessionHistoryItem[];
   securityAlerts: SecurityAlert[];
+  adminStationActivity: AdminStationActivity;
   hardwareKioskStationId: string;
   isKioskDoorOpen: boolean;
   activeKioskSlotReleased: number | null;
@@ -124,9 +135,9 @@ interface UniChargeContextType {
   setSelectedStation: (station: KioskStation) => void;
   setSelectedSlot: (slot: LockerSlot | null) => void;
   setSelectedService: (service: ServiceType) => void;
-  setSelectedSize: (size: LockerSize) => void;
+  setSelectedTier: (tier: PricingTier) => void;
   setSelectedDuration: (duration: number) => void;
-  calculateFee: (size: LockerSize, durationMinutes: number, service: ServiceType) => number;
+  calculateFee: (tierOrService?: string, durationMinutes?: number) => number;
   generateUnlockToken: (
     paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash'
   ) => Promise<{ success: boolean; message: string; token?: PendingUnlockToken }>;
@@ -193,10 +204,10 @@ interface UniChargeContextType {
 const UniChargeContext = createContext<UniChargeContextType | undefined>(undefined);
 
 const STORAGE_KEYS = {
-  users: 'unicharge_users_v2',
-  currentUserId: 'unicharge_current_user_id_v2',
-  sessions: 'unicharge_sessions_by_user_v2',
-  history: 'unicharge_history_by_user_v2',
+  users: 'unicharge_users_v3',
+  currentUserId: 'unicharge_current_user_id_v3',
+  sessions: 'unicharge_sessions_by_user_v3',
+  history: 'unicharge_history_by_user_v3',
 };
 
 function readStorage<T>(key: string, fallback: T): T {
@@ -265,10 +276,13 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const [stations, setStations] = useState<KioskStation[]>(INITIAL_STATIONS);
   const [selectedStation, setSelectedStation] = useState<KioskStation>(INITIAL_STATIONS[0]);
-  const [selectedSlot, setSelectedSlot] = useState<LockerSlot | null>(INITIAL_STATIONS[0].slots[0]);
-  const [selectedService, setSelectedService] = useState<ServiceType>('both');
-  const [selectedSize, setSelectedSize] = useState<LockerSize>('S');
-  const [selectedDuration, setSelectedDuration] = useState<number>(60);
+  const [selectedSlot, setSelectedSlot] = useState<LockerSlot | null>(
+    INITIAL_STATIONS[0].slots.find((s) => s.status === 'available' && s.category === 'charging') ||
+      INITIAL_STATIONS[0].slots[0]
+  );
+  const [selectedService, setSelectedServiceState] = useState<ServiceType>('charging');
+  const [selectedTier, setSelectedTierState] = useState<PricingTier>(PRICING_TIERS[0]);
+  const [selectedDuration, setSelectedDuration] = useState<number>(PRICING_TIERS[0].durationMinutes);
   const [sessionsByUserId, setSessionsByUserId] = useState<
     Record<string, ActiveSession | null>
   >(() =>
@@ -286,9 +300,14 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [pendingUnlockToken, setPendingUnlockToken] = useState<PendingUnlockToken | null>(null);
   const [pendingSecondsLeft, setPendingSecondsLeft] = useState<number>(0);
   const [securityAlerts, setSecurityAlerts] = useState<SecurityAlert[]>(INITIAL_SECURITY_ALERTS);
+  const [adminStationActivity, setAdminStationActivity] = useState<AdminStationActivity>({
+    activeSessions: [],
+    pendingReservations: [],
+    recentTransactions: [],
+  });
 
   // Physical Kiosk Hardware Simulation state
-  const [hardwareKioskStationId, setHardwareKioskStationId] = useState<string>('station-citc-01');
+  const [hardwareKioskStationId, setHardwareKioskStationId] = useState<string>(UNICHARGE_STATION_ID);
   const [isKioskDoorOpen, setIsKioskDoorOpen] = useState<boolean>(false);
   const [activeKioskSlotReleased, setActiveKioskSlotReleased] = useState<number | null>(null);
 
@@ -342,6 +361,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       activeSession?: ActiveSession | null;
       sessionHistory?: SessionHistoryItem[];
       pendingUnlockToken?: PendingUnlockToken | null;
+      stationActivity?: AdminStationActivity;
     }): UserAccount => {
       const loadedUser = data.user;
       setCurrentUser(loadedUser);
@@ -365,6 +385,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
       if (Array.isArray(data.securityAlerts)) {
         setSecurityAlerts(data.securityAlerts);
+      }
+      if (data.stationActivity) {
+        setAdminStationActivity(data.stationActivity);
       }
       setSessionsByUserId((prev) => ({
         ...prev,
@@ -443,6 +466,113 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const isFirestoreLive = Boolean(
     isAuthenticated && firebaseAuthUser && firebaseAuthUser.emailVerified
   );
+
+  const syncChannelRef = useRef<BroadcastChannel | null>(null);
+  const syncInFlightRef = useRef<boolean>(false);
+
+  const syncStationState = useCallback(async () => {
+    if (!isBackendSessionRef.current || syncInFlightRef.current) return;
+    syncInFlightRef.current = true;
+    try {
+      const data = await authorizedFetch('/api/station/sync');
+      if (!data) return;
+      if (Array.isArray(data.stations) && data.stations.length > 0) {
+        const nextStations = data.stations as KioskStation[];
+        setStations(nextStations);
+        setSelectedStation(
+          (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
+        );
+      }
+      if (Array.isArray(data.securityAlerts)) {
+        setSecurityAlerts(data.securityAlerts as SecurityAlert[]);
+      }
+      if (data.stationActivity) {
+        setAdminStationActivity(data.stationActivity as AdminStationActivity);
+      }
+      if (Array.isArray(data.users) && data.users.length > 0) {
+        setUsers((prev) => {
+          const merged = [...prev];
+          for (const u of data.users as UserAccount[]) {
+            const idx = merged.findIndex((m) => m.id === u.id || m.email === u.email);
+            if (idx >= 0) merged[idx] = { ...merged[idx], ...u };
+            else merged.push(u);
+          }
+          return merged;
+        });
+      }
+      if (data.user) {
+        const syncedUser = data.user as UserAccount;
+        setCurrentUser((prev) => (prev ? { ...prev, ...syncedUser } : syncedUser));
+        setSessionsByUserId((prevMap) => {
+          const localActive = prevMap[syncedUser.id];
+          const serverActive = (data.activeSession ?? null) as ActiveSession | null;
+          if (!serverActive) {
+            return localActive === null ? prevMap : { ...prevMap, [syncedUser.id]: null };
+          }
+          if (localActive && localActive.sessionId === serverActive.sessionId) {
+            return prevMap;
+          }
+          return { ...prevMap, [syncedUser.id]: serverActive };
+        });
+        if (Array.isArray(data.sessionHistory)) {
+          setHistoryByUserId((prevMap) => ({
+            ...prevMap,
+            [syncedUser.id]: data.sessionHistory as SessionHistoryItem[],
+          }));
+        }
+        if (data.pendingUnlockToken !== undefined) {
+          setPendingUnlockToken(data.pendingUnlockToken as PendingUnlockToken | null);
+        }
+      }
+    } catch {
+      // Ignore transient polling failures
+    } finally {
+      syncInFlightRef.current = false;
+    }
+  }, [authorizedFetch]);
+
+  const notifyStationSync = useCallback(() => {
+    try {
+      syncChannelRef.current?.postMessage({ type: 'station-updated', at: Date.now() });
+    } catch {
+      // Ignore BroadcastChannel errors
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated || !isBackendSessionRef.current) return;
+
+    let channel: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      channel = new BroadcastChannel('unicharge_station_sync');
+      syncChannelRef.current = channel;
+      channel.onmessage = () => {
+        void syncStationState();
+      };
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void syncStationState();
+      }
+    }, 3000);
+
+    const handleFocusOrVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void syncStationState();
+      }
+    };
+    window.addEventListener('focus', handleFocusOrVisibility);
+    document.addEventListener('visibilitychange', handleFocusOrVisibility);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleFocusOrVisibility);
+      document.removeEventListener('visibilitychange', handleFocusOrVisibility);
+      channel?.close();
+      syncChannelRef.current = null;
+    };
+  }, [isAuthenticated, syncStationState]);
 
   // Real-time Firestore onSnapshot subscription (only when Firebase Auth is verified & active)
   useEffect(() => {
@@ -632,16 +762,38 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     return () => clearInterval(interval);
   }, [activeSession?.status, currentUser?.id]);
 
+  const setSelectedService = useCallback(
+    (service: ServiceType) => {
+      setSelectedServiceState(service);
+      const defaultTier = getDefaultTierForService(service);
+      setSelectedTierState(defaultTier);
+      setSelectedDuration(defaultTier.durationMinutes);
+      const firstFree =
+        selectedStation.slots.find(
+          (s) => s.status === 'available' && s.category === service
+        ) ||
+        selectedStation.slots.find((s) => s.category === service) ||
+        null;
+      setSelectedSlot(firstFree);
+    },
+    [selectedStation.slots]
+  );
+
+  const setSelectedTier = useCallback((tier: PricingTier) => {
+    setSelectedTierState(tier);
+    setSelectedServiceState(tier.serviceType);
+    setSelectedDuration(tier.durationMinutes);
+  }, []);
+
   const calculateFee = (
-    size: LockerSize,
-    durationMinutes: number,
-    service: ServiceType
+    tierOrService: string = selectedTier.id,
+    durationMinutes: number = selectedDuration
   ): number => {
-    const hourlyRate = PRICING_RATES[size]?.hourly || 15;
-    const hours = durationMinutes / 60;
-    const baseFee = hourlyRate * hours;
-    const addOn = service === 'both' ? 5 : 0;
-    return Math.round(baseFee + addOn);
+    return resolvePricingTier({
+      tierId: tierOrService,
+      serviceType: selectedService,
+      durationMinutes,
+    }).fee;
   };
 
   // Account-level RBAC login resolution (backed by PostgreSQL)
@@ -1013,18 +1165,27 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     sound.playTap();
 
     const slotToBook =
-      selectedSlot ||
-      selectedStation.slots.find((s) => s.status === 'available') ||
-      selectedStation.slots[0];
+      (selectedSlot &&
+      selectedSlot.status === 'available' &&
+      selectedSlot.category === selectedService
+        ? selectedSlot
+        : null) ||
+      selectedStation.slots.find(
+        (s) => s.status === 'available' && s.category === selectedService
+      );
 
     if (!slotToBook || slotToBook.status !== 'available') {
       return {
         success: false,
-        message: 'Selected compartment is no longer available. Please choose a free compartment.',
+        message: `No free ${selectedService} compartments right now. Please check back shortly.`,
       };
     }
 
-    const fee = calculateFee(selectedSize, selectedDuration, selectedService);
+    const activeTier =
+      selectedTier.serviceType === selectedService
+        ? selectedTier
+        : getDefaultTierForService(selectedService);
+    const fee = activeTier.fee;
 
     if (paymentMethod === 'wallet' && student.walletBalance < fee) {
       return {
@@ -1043,8 +1204,8 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             stationId: selectedStation.id,
             slotNumber: slotToBook.slotNumber,
             serviceType: selectedService,
-            compartmentSize: selectedSize,
-            durationMinutes: selectedDuration,
+            pricingTier: activeTier.name,
+            durationMinutes: activeTier.durationMinutes,
             paymentMethod,
           }),
         });
@@ -1055,15 +1216,25 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           };
         }
         const serverToken = data.token as PendingUnlockToken;
+        if (Array.isArray(data.stations) && data.stations.length > 0) {
+          const nextStations = data.stations as KioskStation[];
+          setStations(nextStations);
+          setSelectedStation(
+            (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
+          );
+        }
         setPendingUnlockToken(serverToken);
         setHardwareKioskStationId(selectedStation.id);
+        notifyStationSync();
 
         const emailSuffix = serverToken.emailSent
           ? ` QR pass emailed to ${serverToken.emailSentTo}.`
           : '';
         return {
           success: true,
-          message: `QR Unlock Token generated for ${selectedStation.name} Slot #${slotToBook.slotNumber}.${emailSuffix}`,
+          message: `QR Unlock Token generated for ${formatCompartmentLabel(
+            slotToBook.slotNumber
+          )} (${activeTier.name}).${emailSuffix}`,
           token: serverToken,
         };
       } catch (error: unknown) {
@@ -1076,6 +1247,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     const now = Date.now();
     const randomPin = String(Math.floor(100000 + Math.random() * 900000));
     const tokenId = `TOK-${Math.floor(10000 + Math.random() * 90000)}`;
+    const compartmentCode = formatCompartmentCode(slotToBook.slotNumber);
     const token: PendingUnlockToken = {
       tokenId,
       stationId: selectedStation.id,
@@ -1083,22 +1255,44 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       stationCode: selectedStation.campusCode,
       slotNumber: slotToBook.slotNumber,
       serviceType: selectedService,
-      compartmentSize: selectedSize,
-      durationMinutes: selectedDuration,
+      pricingTier: activeTier.name,
+      durationMinutes: activeTier.durationMinutes,
       totalFee: fee,
       paymentMethod,
-      qrPayload: `UNICHARGE|${selectedStation.campusCode}|SLOT-${slotToBook.slotNumber}|PIN-${randomPin}|${tokenId}`,
+      qrPayload: `UNICHARGE|${selectedStation.campusCode}|SLOT-${compartmentCode}|PIN-${randomPin}|${tokenId}`,
       pinCode: randomPin,
       createdAt: now,
       expiresAt: now + 5 * 60 * 1000,
     };
+
+    setStations((prevStations) =>
+      prevStations.map((st) => {
+        if (st.id !== selectedStation.id) return st;
+        const updatedSlots = st.slots.map((s) => {
+          if (pendingUnlockToken && s.slotNumber === pendingUnlockToken.slotNumber) {
+            return { ...s, status: 'available' as const, isDoorOpen: false, isLocked: true };
+          }
+          if (s.slotNumber === slotToBook.slotNumber) {
+            return { ...s, status: 'in_use' as const, isDoorOpen: false, isLocked: true };
+          }
+          return s;
+        });
+        return {
+          ...st,
+          slots: updatedSlots,
+          availableSlots: updatedSlots.filter((s) => s.status === 'available').length,
+        };
+      })
+    );
 
     setPendingUnlockToken(token);
     setHardwareKioskStationId(selectedStation.id);
 
     return {
       success: true,
-      message: `QR Unlock Token generated for ${selectedStation.name} Slot #${slotToBook.slotNumber}. Scan at the physical kiosk within 5 minutes.`,
+      message: `QR Unlock Token generated for ${formatCompartmentLabel(
+        slotToBook.slotNumber
+      )}. Scan at the kiosk within 5 minutes.`,
       token,
     };
   };
@@ -1168,12 +1362,39 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const cancelPendingUnlock = () => {
     sound.playTap();
-    const activeTokenId = pendingUnlockToken?.tokenId;
+    const activeToken = pendingUnlockToken;
     setPendingUnlockToken(null);
-    if (isBackendSessionRef.current && activeTokenId) {
-      authorizedFetch(`/api/kiosk/unlock-tokens/${encodeURIComponent(activeTokenId)}`, {
+    if (isBackendSessionRef.current && activeToken?.tokenId) {
+      authorizedFetch(`/api/kiosk/unlock-tokens/${encodeURIComponent(activeToken.tokenId)}`, {
         method: 'DELETE',
-      }).catch((err) => console.error('Cancel unlock token failed:', err));
+      })
+        .then((data) => {
+          if (Array.isArray(data?.stations) && data.stations.length > 0) {
+            const nextStations = data.stations as KioskStation[];
+            setStations(nextStations);
+            setSelectedStation(
+              (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
+            );
+          }
+          notifyStationSync();
+        })
+        .catch((err) => console.error('Cancel unlock token failed:', err));
+    } else if (activeToken) {
+      setStations((prevStations) =>
+        prevStations.map((st) => {
+          if (st.id !== activeToken.stationId) return st;
+          const updatedSlots = st.slots.map((s) =>
+            s.slotNumber === activeToken.slotNumber
+              ? { ...s, status: 'available' as const, isDoorOpen: false, isLocked: true }
+              : s
+          );
+          return {
+            ...st,
+            slots: updatedSlots,
+            availableSlots: updatedSlots.filter((s) => s.status === 'available').length,
+          };
+        })
+      );
     }
   };
 
@@ -1230,6 +1451,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         setActiveKioskSlotReleased(verifiedSession.slotNumber);
         setActiveSessionForCurrentUser(verifiedSession);
         setPendingUnlockToken(null);
+        notifyStationSync();
 
         confetti({
           particleCount: 55,
@@ -1242,7 +1464,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           success: true,
           message:
             data.message ||
-            `Kiosk Verified! Compartment #${verifiedSession.slotNumber} Solenoid Unlatched at ${verifiedSession.stationName}.`,
+            `Kiosk Verified! ${formatCompartmentLabel(
+              verifiedSession.slotNumber
+            )} Solenoid Unlatched at ${verifiedSession.stationName}.`,
         };
       } catch (error: unknown) {
         const message =
@@ -1332,7 +1556,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       building: targetStation.building,
       slotNumber: pendingUnlockToken.slotNumber,
       serviceType: pendingUnlockToken.serviceType,
-      compartmentSize: pendingUnlockToken.compartmentSize,
+      pricingTier: pendingUnlockToken.pricingTier,
       startTime: Date.now(),
       durationMinutes: pendingUnlockToken.durationMinutes,
       remainingSeconds: pendingUnlockToken.durationMinutes * 60,
@@ -1359,7 +1583,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     return {
       success: true,
-      message: `Kiosk Verified! Compartment #${newSession.slotNumber} Solenoid Unlatched at ${newSession.stationName}.`,
+      message: `Kiosk Verified! ${formatCompartmentLabel(
+        newSession.slotNumber
+      )} Solenoid Unlatched at ${newSession.stationName}.`,
     };
   };
 
@@ -1371,10 +1597,20 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     sound.playBeep();
 
     const slotToBook =
-      selectedSlot ||
-      selectedStation.slots.find((s) => s.status === 'available') ||
+      (selectedSlot &&
+      selectedSlot.status === 'available' &&
+      selectedSlot.category === selectedService
+        ? selectedSlot
+        : null) ||
+      selectedStation.slots.find(
+        (s) => s.status === 'available' && s.category === selectedService
+      ) ||
       selectedStation.slots[0];
-    const fee = calculateFee(selectedSize, selectedDuration, selectedService);
+    const activeTier =
+      selectedTier.serviceType === selectedService
+        ? selectedTier
+        : getDefaultTierForService(selectedService);
+    const fee = activeTier.fee;
 
     if (paymentMethod === 'wallet') {
       if (student.walletBalance < fee) {
@@ -1418,21 +1654,22 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       stationName: selectedStation.name,
       building: selectedStation.building,
       slotNumber: slotToBook.slotNumber,
-      serviceType: selectedService,
-      compartmentSize: selectedSize,
+      serviceType: activeTier.serviceType,
+      pricingTier: activeTier.name,
       startTime: Date.now(),
-      durationMinutes: selectedDuration,
-      remainingSeconds: selectedDuration * 60,
+      durationMinutes: activeTier.durationMinutes,
+      remainingSeconds: activeTier.durationMinutes * 60,
       totalFee: fee,
       batteryInitial: 38,
       batteryCurrent: 38,
-      chargingRateWatts: selectedService === 'storage' ? 0 : 58.4,
+      chargingRateWatts: activeTier.serviceType === 'storage' ? 0 : 58.4,
       lockerTemperature: 28.6,
       isOverchargeProtectionActive: true,
       isTamperAlertArmed: true,
       status: 'active',
       qrVerificationCode:
-        qrCode || `${selectedStation.campusCode}-SLOT${slotToBook.slotNumber}-AUTH`,
+        qrCode ||
+        `${selectedStation.campusCode}-SLOT${formatCompartmentCode(slotToBook.slotNumber)}-AUTH`,
     };
 
     setActiveSessionForCurrentUser(newSession);
@@ -1444,7 +1681,18 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           session: newSession,
           deductWalletAmount: paymentMethod === 'wallet' ? fee : 0,
         }),
-      }).catch((err) => console.error('QR session sync failed:', err));
+      })
+        .then((data) => {
+          if (Array.isArray(data?.stations) && data.stations.length > 0) {
+            const nextStations = data.stations as KioskStation[];
+            setStations(nextStations);
+            setSelectedStation(
+              (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
+            );
+          }
+          notifyStationSync();
+        })
+        .catch((err) => console.error('QR session sync failed:', err));
     }
 
     confetti({
@@ -1456,7 +1704,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     return {
       success: true,
-      message: `Compartment #${slotToBook.slotNumber} Solenoid Unlatched! Please place your belongings and plug in the cable.`,
+      message: `${formatCompartmentLabel(
+        slotToBook.slotNumber
+      )} Solenoid Unlatched! Please place your belongings inside.`,
     };
   };
 
@@ -1492,7 +1742,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       durationMinutes: activeSession.durationMinutes,
       totalFee: activeSession.totalFee,
       serviceType: activeSession.serviceType,
-      compartmentSize: activeSession.compartmentSize,
+      pricingTier: activeSession.pricingTier,
       status: 'Completed',
     };
 
@@ -1515,7 +1765,18 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           receiptNumber: historyEntry.receiptNumber,
           dateLabel: historyEntry.date,
         }),
-      }).catch((err) => console.error('End session sync failed:', err));
+      })
+        .then((data) => {
+          if (Array.isArray(data?.stations) && data.stations.length > 0) {
+            const nextStations = data.stations as KioskStation[];
+            setStations(nextStations);
+            setSelectedStation(
+              (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
+            );
+          }
+          notifyStationSync();
+        })
+        .catch((err) => console.error('End session sync failed:', err));
     }
 
     confetti({
@@ -1527,7 +1788,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     return {
       success: true,
-      message: `Compartment #${historyEntry.slotNumber} unlocked! Please retrieve your device. Thank you for using UniCharge USTP!`,
+      message: `${formatCompartmentLabel(
+        historyEntry.slotNumber
+      )} unlocked! Please retrieve your device. Thank you for using UniCharge USTP!`,
     };
   };
 
@@ -1547,6 +1810,28 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         return st;
       })
     );
+
+    if (isBackendSessionRef.current) {
+      authorizedFetch('/api/kiosk/door-state', {
+        method: 'POST',
+        body: JSON.stringify({
+          stationId: hardwareKioskStationId,
+          slotNumber,
+          isDoorOpen: false,
+        }),
+      })
+        .then((data) => {
+          if (Array.isArray(data?.stations) && data.stations.length > 0) {
+            const nextStations = data.stations as KioskStation[];
+            setStations(nextStations);
+            setSelectedStation(
+              (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
+            );
+          }
+          notifyStationSync();
+        })
+        .catch((err) => console.error('Close door sync failed:', err));
+    }
   };
 
   const topUpWallet = (amount: number) => {
@@ -1685,7 +1970,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     notifiedChargeSessionsRef.current.add(activeSession.sessionId);
     const station = stations.find((s) => s.id === activeSession.stationId);
-    const stationCode = station?.campusCode || 'USTP-CITC-K01';
+    const stationCode = station?.campusCode || UNICHARGE_STATION_CODE;
 
     void pushNotificationEvent({
       id: `chg_${activeSession.sessionId}`,
@@ -1697,7 +1982,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       type: 'charge_complete',
       severity: 'info',
       title: 'Device Fully Charged (100%)',
-      message: `Compartment #${activeSession.slotNumber} at ${activeSession.stationName} has reached 100%. Overcharge auto cut-off is protecting your battery — retrieve your device anytime.`,
+      message: `${formatCompartmentLabel(activeSession.slotNumber)} at ${
+        activeSession.stationName
+      } has reached 100%. Overcharge auto cut-off is protecting your battery — retrieve your device anytime.`,
     });
   }, [activeSession, currentUser, pushNotificationEvent, stations]);
 
@@ -1808,29 +2095,55 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       {
         id: `alt-${Date.now()}`,
         timestamp: 'Just now',
-        stationCode: targetStation?.campusCode || 'USTP-CITC-K01',
-        stationName: targetStation?.name || 'CITC Building 1st Fl Lounge',
+        stationCode: targetStation?.campusCode || UNICHARGE_STATION_CODE,
+        stationName: targetStation?.name || UNICHARGE_STATION_NAME,
         slotNumber: targetSlotNumber,
         severity: 'critical',
         type: 'Tamper Vibration',
-        message: `Unexpected door opening detected on Compartment #${targetSlotNumber} without QR/PIN retrieval authorization.`,
+        message: `Unexpected door opening detected on ${formatCompartmentLabel(
+          targetSlotNumber
+        )} without QR/PIN retrieval authorization.`,
         resolved: false,
       },
       ...prev,
     ]);
 
+    if (isBackendSessionRef.current) {
+      authorizedFetch('/api/kiosk/tamper-alert', {
+        method: 'POST',
+        body: JSON.stringify({
+          stationId: targetStationId,
+          slotNumber: targetSlotNumber,
+        }),
+      })
+        .then((data) => {
+          if (Array.isArray(data?.stations) && data.stations.length > 0) {
+            const nextStations = data.stations as KioskStation[];
+            setStations(nextStations);
+            setSelectedStation(
+              (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
+            );
+          }
+          if (Array.isArray(data?.securityAlerts)) {
+            setSecurityAlerts(data.securityAlerts as SecurityAlert[]);
+          }
+          notifyStationSync();
+        })
+        .catch((err) => console.error('Tamper alert persistence failed:', err));
+    }
+
     await pushNotificationEvent({
       id: `door_${targetSessionId}_${Date.now()}`,
       sessionId: targetSessionId,
       stationId: targetStationId,
-      stationCode: targetStation?.campusCode || 'USTP-CITC-K01',
-      stationName: targetStation?.name || 'CITC Building 1st Fl Lounge',
+      stationCode: targetStation?.campusCode || UNICHARGE_STATION_CODE,
+      stationName: targetStation?.name || UNICHARGE_STATION_NAME,
       slotNumber: targetSlotNumber,
       type: 'unexpected_door_open',
       severity: 'critical',
       title: 'Locker Door Opened Unexpectedly!',
-      message: `Compartment #${targetSlotNumber} at ${
-        targetStation?.name || 'USTP Kiosk'
+      message: `${formatCompartmentLabel(targetSlotNumber)} at ${
+        targetStation?.name || UNICHARGE_STATION_NAME
       } unlatched without authorization. Check your device or tap Kiosk Scanner immediately.`,
     });
   };
@@ -1872,7 +2185,18 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           isDoorOpen: true,
           isLocked: false,
         }),
-      }).catch((err) => console.error('Admin unlock sync failed:', err));
+      })
+        .then((data) => {
+          if (Array.isArray(data?.stations) && data.stations.length > 0) {
+            const nextStations = data.stations as KioskStation[];
+            setStations(nextStations);
+            setSelectedStation(
+              (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
+            );
+          }
+          notifyStationSync();
+        })
+        .catch((err) => console.error('Admin unlock sync failed:', err));
     }
   };
 
@@ -1905,7 +2229,18 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           slotNumber,
           status: computedStatus,
         }),
-      }).catch((err) => console.error('Admin maintenance sync failed:', err));
+      })
+        .then((data) => {
+          if (Array.isArray(data?.stations) && data.stations.length > 0) {
+            const nextStations = data.stations as KioskStation[];
+            setStations(nextStations);
+            setSelectedStation(
+              (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
+            );
+          }
+          notifyStationSync();
+        })
+        .catch((err) => console.error('Admin maintenance sync failed:', err));
     }
   };
 
@@ -1964,7 +2299,14 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       authorizedFetch('/api/admin/alerts/resolve', {
         method: 'POST',
         body: JSON.stringify({ alertId }),
-      }).catch((err) => console.error('Admin alert sync failed:', err));
+      })
+        .then((data) => {
+          if (Array.isArray(data?.securityAlerts)) {
+            setSecurityAlerts(data.securityAlerts as SecurityAlert[]);
+          }
+          notifyStationSync();
+        })
+        .catch((err) => console.error('Admin alert sync failed:', err));
     }
   };
 
@@ -1985,13 +2327,14 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         selectedStation,
         selectedSlot,
         selectedService,
-        selectedSize,
+        selectedTier,
         selectedDuration,
         activeSession,
         pendingUnlockToken,
         pendingSecondsLeft,
         sessionHistory,
         securityAlerts,
+        adminStationActivity,
         hardwareKioskStationId,
         isKioskDoorOpen,
         activeKioskSlotReleased,
@@ -2009,7 +2352,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         setSelectedStation,
         setSelectedSlot,
         setSelectedService,
-        setSelectedSize,
+        setSelectedTier,
         setSelectedDuration,
         calculateFee,
         generateUnlockToken,

@@ -1,15 +1,34 @@
 export type UserRole = 'student' | 'admin';
 
-export type LockerSize = 'S' | 'M' | 'L';
+export type LockerCategory = 'charging' | 'storage';
 
 export type LockerStatus = 'available' | 'in_use' | 'maintenance';
 
-export type ServiceType = 'charging' | 'storage' | 'both';
+export type ServiceType = 'charging' | 'storage';
+
+export type PricingTierId =
+  | 'charging-short'
+  | 'charging-long'
+  | 'storage-short'
+  | 'storage-medium'
+  | 'storage-long'
+  | 'storage-extended-long';
+
+export interface PricingTier {
+  id: PricingTierId;
+  name: string;
+  serviceType: ServiceType;
+  durationLabel: string;
+  durationMinutes: number;
+  fee: number;
+  description: string;
+}
 
 export interface LockerSlot {
   id: string;
   slotNumber: number;
-  size: LockerSize;
+  code: string;
+  category: LockerCategory;
   status: LockerStatus;
   chargingPower: string;
   currentTemp: number;
@@ -43,7 +62,7 @@ export interface PendingUnlockToken {
   stationCode: string;
   slotNumber: number;
   serviceType: ServiceType;
-  compartmentSize: LockerSize;
+  pricingTier: string;
   durationMinutes: number;
   totalFee: number;
   paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash';
@@ -66,7 +85,7 @@ export interface ActiveSession {
   building: string;
   slotNumber: number;
   serviceType: ServiceType;
-  compartmentSize: LockerSize;
+  pricingTier: string;
   startTime: number;
   durationMinutes: number;
   remainingSeconds: number;
@@ -112,7 +131,7 @@ export interface SessionHistoryItem {
   durationMinutes: number;
   totalFee: number;
   serviceType: ServiceType;
-  compartmentSize: LockerSize;
+  pricingTier: string;
   status: 'Completed' | 'Refunded';
 }
 
@@ -149,3 +168,23 @@ export interface DashboardNotification {
   source?: 'firestore' | 'local';
 }
 
+export interface AdminStationTransaction {
+  id: string;
+  kind: 'reserved' | 'active' | 'completed';
+  userUid: string;
+  userName: string;
+  studentIdNumber: string;
+  slotNumber: number;
+  serviceType: ServiceType;
+  pricingTier: string;
+  totalFee: number;
+  paymentMethod?: string;
+  createdAtMs: number;
+  expiresAtMs?: number;
+}
+
+export interface AdminStationActivity {
+  activeSessions: AdminStationTransaction[];
+  pendingReservations: AdminStationTransaction[];
+  recentTransactions: AdminStationTransaction[];
+}

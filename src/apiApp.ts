@@ -36,6 +36,7 @@ import {
   UNICHARGE_STATION_ID,
   formatCompartmentLabel,
 } from './constants/pricing.ts';
+import { formatSessionDateTime } from './utils/format.ts';
 import type { LockerStatus, ServiceType } from './types/index.ts';
 
 export const apiApp = express();
@@ -556,13 +557,18 @@ apiApp.post('/api/sessions/end', requireAuth, async (req: AuthRequest, res) => {
     if (!sessionId || !stationId || typeof slotNumber !== 'number') {
       return res.status(400).json({ error: 'Invalid end session payload' });
     }
+    const rawDateLabel = typeof dateLabel === 'string' ? dateLabel.trim() : '';
+    const resolvedDateLabel =
+      !rawDateLabel || rawDateLabel.toLowerCase() === 'just now'
+        ? formatSessionDateTime(new Date())
+        : rawDateLabel;
     const stations = await endSessionDb({
       uid,
       sessionId,
       stationId,
       slotNumber,
       receiptNumber: String(receiptNumber || `USTP-REC-${Date.now()}`),
-      dateLabel: String(dateLabel || 'Just now'),
+      dateLabel: resolvedDateLabel,
     });
     res.json({ ok: true, stations });
   } catch (error: unknown) {

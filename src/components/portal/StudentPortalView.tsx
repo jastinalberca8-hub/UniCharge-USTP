@@ -15,7 +15,6 @@ import { LockerSlot, ServiceType, SessionHistoryItem } from '../../types';
 import {
   Zap,
   BatteryCharging,
-  Thermometer,
   Clock,
   Lock,
   Unlock,
@@ -236,7 +235,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                 className="px-4 py-2 rounded-xl bg-[#4E6E81] text-white text-xs font-semibold hover:bg-[#3D5767] flex items-center gap-2 cursor-pointer shadow-sm transition-colors"
               >
                 <Zap className="w-4 h-4 text-[#5BC496] fill-[#5BC496]" />
-                <span>Reserve a Locker</span>
+                <span>Avail a Locker</span>
               </button>
             </div>
           </div>
@@ -342,7 +341,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               <span className="text-xs text-[#64748B] mt-2 block truncate">
                 {activeSession
                   ? `${activeSession.pricingTier} · ${formatTimer(activeSession.remainingSeconds)} left`
-                  : 'Ready to reserve a compartment'}
+                  : 'Ready to avail a compartment'}
               </span>
             </div>
 
@@ -402,7 +401,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                         {activeSession.batteryCurrent}%
                       </span>
                       <span className="text-[11px] text-slate-100/80 font-mono">
-                        {activeSession.chargingRateWatts}W · {activeSession.lockerTemperature}°C
+                        {activeSession.serviceType === 'storage'
+                          ? 'Solenoid Locked'
+                          : `${activeSession.chargingRateWatts}W USB-C PD`}
                       </span>
                     </div>
                   </div>
@@ -469,7 +470,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                     onClick={() => openBookingWithSlot()}
                     className="px-4 py-2 rounded-xl bg-[#4E6E81] text-white text-xs font-semibold hover:bg-[#3D5767] cursor-pointer transition-colors"
                   >
-                    Reserve a Locker
+                    Avail a Locker
                   </button>
                 </div>
               )}
@@ -490,7 +491,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   onClick={() => openBookingWithSlot()}
                   className="text-xs font-semibold text-[#4E6E81] hover:text-[#5BC496] cursor-pointer transition-colors"
                 >
-                  Reserve Compartment →
+                  Avail Compartment →
                 </button>
               </div>
 
@@ -612,7 +613,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
       return (
         <div className="max-w-4xl space-y-6">
           <div>
-            <h1 className="text-2xl font-bold text-[#4E6E81] tracking-tight">Reserve a Locker</h1>
+            <h1 className="text-2xl font-bold text-[#4E6E81] tracking-tight">Avail a Locker</h1>
             <p className="text-sm text-[#64748B]">
               {station.name} ({station.campusCode}) · {CHARGING_SLOT_COUNT} Charging &amp; {STORAGE_SLOT_COUNT} Storage Compartments
             </p>
@@ -928,7 +929,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 py-5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 py-5">
                 <div className="p-4 rounded-xl bg-[#4E6E81] text-white">
                   <span className="text-xs text-slate-100 flex items-center gap-1.5">
                     <Clock className="w-3.5 h-3.5 text-[#5BC496]" /> Time Remaining
@@ -944,16 +945,11 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   <span className="text-3xl font-bold font-mono text-[#1E293B] mt-1 block">
                     {activeSession.batteryCurrent}%
                   </span>
-                  <span className="text-xs text-[#64748B] font-mono">{activeSession.chargingRateWatts}W PD active</span>
-                </div>
-                <div className="p-4 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
-                  <span className="text-xs text-[#64748B] flex items-center gap-1.5">
-                    <Thermometer className="w-3.5 h-3.5 text-[#4E6E81]" /> Thermal Sensor
+                  <span className="text-xs text-[#64748B] font-mono">
+                    {activeSession.serviceType === 'storage'
+                      ? 'Secure storage locked'
+                      : `${activeSession.chargingRateWatts}W PD active`}
                   </span>
-                  <span className="text-3xl font-bold font-mono text-[#1E293B] mt-1 block">
-                    {activeSession.lockerTemperature}°C
-                  </span>
-                  <span className="text-xs text-[#5BC496] font-semibold">Nominal thermal range</span>
                 </div>
               </div>
 
@@ -990,13 +986,13 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
             <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-8 text-center">
               <p className="text-sm font-semibold text-[#1E293B]">No active session right now</p>
               <p className="text-xs text-[#64748B] mt-1 mb-4">
-                Reserve any available charging or storage compartment to begin.
+                Avail any available charging or storage compartment to begin.
               </p>
               <button
                 onClick={() => openBookingWithSlot()}
                 className="px-4 py-2 rounded-xl bg-[#4E6E81] text-white text-xs font-semibold hover:bg-[#3D5767] cursor-pointer"
               >
-                Reserve a Locker
+                Avail a Locker
               </button>
             </div>
           )}
@@ -1010,7 +1006,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
             <div className="overflow-x-auto">
               {sessionHistory.length === 0 ? (
                 <div className="py-10 px-6 text-center text-xs text-[#64748B]">
-                  No completed sessions yet. Reserve a locker to view your receipts here.
+                  No completed sessions yet. Avail a locker to view your receipts here.
                 </div>
               ) : (
                 <table className="w-full text-left text-xs">
@@ -1066,6 +1062,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   <div className="flex justify-between"><span className="text-[#64748B]">Tier</span><span className="font-semibold text-[#1E293B]">{selectedReceipt.pricingTier}</span></div>
                   <div className="flex justify-between"><span className="text-[#64748B]">Compartment</span><span className="font-mono text-[#1E293B]">{formatCompartmentLabel(selectedReceipt.slotNumber)}</span></div>
                   <div className="flex justify-between"><span className="text-[#64748B]">Duration</span><span className="font-mono text-[#1E293B]">{formatDuration(selectedReceipt.durationMinutes)}</span></div>
+                  <div className="flex justify-between"><span className="text-[#64748B]">Date</span><span className="font-mono text-[#1E293B]">{selectedReceipt.date}</span></div>
                   <div className="flex justify-between"><span className="text-[#64748B]">Amount Paid</span><span className="font-mono font-bold text-[#4E6E81]">₱{selectedReceipt.totalFee}.00</span></div>
                 </div>
                 <button
@@ -1148,7 +1145,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
             <h3 className="text-sm font-bold text-[#4E6E81]">Recent Wallet Activity</h3>
             {sessionHistory.length === 0 ? (
               <p className="py-6 text-center text-xs text-[#64748B]">
-                No transactions yet. Reload your wallet above or reserve a locker to get started.
+                No transactions yet. Reload your wallet above or avail a locker to get started.
               </p>
             ) : (
               <div className="divide-y divide-[#E2E8F0] text-xs">

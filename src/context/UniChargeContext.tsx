@@ -19,8 +19,6 @@ import {
   SEEDED_USERS,
   INITIAL_STUDENT,
   INITIAL_STATIONS,
-  INITIAL_SAMPLE_SESSION,
-  INITIAL_HISTORY,
   INITIAL_SECURITY_ALERTS,
 } from '../data/mockData';
 import {
@@ -34,6 +32,7 @@ import {
   resolvePricingTier,
 } from '../constants/pricing';
 import { sound } from '../utils/audio';
+import { formatSessionDateTime } from '../utils/format';
 import {
   createFirestoreNotification,
   deleteFirestoreNotification,
@@ -286,16 +285,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [sessionsByUserId, setSessionsByUserId] = useState<
     Record<string, ActiveSession | null>
   >(() =>
-    readStorage<Record<string, ActiveSession | null>>(STORAGE_KEYS.sessions, {
-      usr_ustp_202330192: INITIAL_SAMPLE_SESSION,
-    })
+    readStorage<Record<string, ActiveSession | null>>(STORAGE_KEYS.sessions, {})
   );
   const [historyByUserId, setHistoryByUserId] = useState<
     Record<string, SessionHistoryItem[]>
   >(() =>
-    readStorage<Record<string, SessionHistoryItem[]>>(STORAGE_KEYS.history, {
-      usr_ustp_202330192: INITIAL_HISTORY,
-    })
+    readStorage<Record<string, SessionHistoryItem[]>>(STORAGE_KEYS.history, {})
   );
   const [pendingUnlockToken, setPendingUnlockToken] = useState<PendingUnlockToken | null>(null);
   const [pendingSecondsLeft, setPendingSecondsLeft] = useState<number>(0);
@@ -1478,7 +1473,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     if (!pendingUnlockToken) {
       return {
         success: false,
-        message: 'No pending QR unlock authorization found. Generate an unlock QR from Reserve a Locker first.',
+        message: 'No pending QR unlock authorization found. Generate an unlock QR from Avail a Locker first.',
       };
     }
 
@@ -1736,7 +1731,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     const historyEntry: SessionHistoryItem = {
       id: `hist-${Date.now()}`,
       receiptNumber: `USTP-REC-${Math.floor(100000 + Math.random() * 900000)}`,
-      date: 'Just now',
+      date: formatSessionDateTime(new Date()),
       stationName: activeSession.stationName,
       slotNumber: activeSession.slotNumber,
       durationMinutes: activeSession.durationMinutes,
@@ -2094,7 +2089,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setSecurityAlerts((prev) => [
       {
         id: `alt-${Date.now()}`,
-        timestamp: 'Just now',
+        timestamp: formatSessionDateTime(new Date()),
         stationCode: targetStation?.campusCode || UNICHARGE_STATION_CODE,
         stationName: targetStation?.name || UNICHARGE_STATION_NAME,
         slotNumber: targetSlotNumber,

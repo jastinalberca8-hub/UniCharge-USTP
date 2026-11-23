@@ -95,7 +95,7 @@ export const PortalLayout: React.FC = () => {
       badge: activeSession ? 1 : undefined,
     },
     { id: 'wallet', label: 'Wallet & Coins', icon: Wallet },
-    { id: 'booking', label: 'Reserve a Locker', icon: Zap },
+    { id: 'booking', label: 'Avail a Locker', icon: Zap },
     { id: 'kiosk', label: 'Kiosk Scanner', icon: ScanLine },
   ];
 

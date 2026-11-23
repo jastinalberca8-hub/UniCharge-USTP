@@ -724,7 +724,7 @@ export const KioskHardwareSimulator: React.FC = () => {
               )}
 
               <div className="mt-2 pt-1.5 border-t border-[#E2E8F0] text-[9px] text-[#64748B] font-mono flex items-center justify-between gap-2">
-                <span className="whitespace-nowrap">29.1°C · 230V AC</span>
+                <span className="whitespace-nowrap">230V AC Supply</span>
                 <span className="whitespace-nowrap">
                   {currentStation.availableSlots}/{TOTAL_COMPARTMENT_COUNT} Free
                 </span>

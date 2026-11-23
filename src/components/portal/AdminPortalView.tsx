@@ -370,7 +370,7 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                       </span>
                     </div>
                     <span className="text-[11px] text-[#64748B] font-mono block mt-0.5">
-                      {slot.currentTemp}°C · {slot.chargingPower}
+                      {slot.chargingPower}
                     </span>
                     {slotActivity && (
                       <span className="text-[11px] text-[#4E6E81] font-medium block truncate mt-0.5">
@@ -604,7 +604,7 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
         <div>
           <h1 className="text-2xl font-bold text-[#4E6E81] tracking-tight">Security &amp; Sensor Logs</h1>
           <p className="text-sm text-[#64748B]">
-            Accelerometer tamper spikes, thermal threshold notifications, and overcharge relay triggers.
+            Accelerometer tamper spikes, solenoid door alerts, and overcharge relay triggers.
           </p>
         </div>
 
@@ -660,10 +660,12 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
     <div className="max-w-2xl space-y-5">
       <div>
         <h1 className="text-2xl font-bold text-[#4E6E81] tracking-tight">
-          {section === 'support' ? 'Operations Support' : 'Station Threshold Settings'}
+          {section === 'support' ? 'Operations Support' : 'Station Safety & Guardrail Settings'}
         </h1>
         <p className="text-sm text-[#64748B]">
-          Configure automated thermal cut-off limits and campus ICT maintenance escalation.
+          {section === 'support'
+            ? 'Campus ICT maintenance escalation and hardware servicing contacts.'
+            : 'Automated overcharge cut-off relays and triaxial tamper thresholds.'}
         </p>
       </div>
       <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 space-y-4 text-xs text-[#64748B]">
@@ -676,18 +678,18 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
           <span>
             {section === 'support'
               ? 'USTP Campus ICT Infrastructure Escalation'
-              : 'Hardware Telemetry Guardrails'}
+              : 'Hardware Protection Guardrails'}
           </span>
         </div>
         <p>
           {section === 'support'
             ? 'Field technicians can be dispatched via USTP Facilities Management at extension 204 for physical solenoid coil or power supply replacement.'
-            : 'Compartments automatically disable USB-C PD output when internal thermistor sensors exceed 42.0°C or when battery current drops below trickle threshold.'}
+            : 'Compartments automatically disable USB-C PD output when connected devices reach 100% battery charge or trigger tamper alerts on unauthorized door opening.'}
         </p>
         <div className="grid grid-cols-2 gap-3 font-mono">
           <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
-            <span className="text-[#64748B] block">Thermal Cut-Off</span>
-            <span className="text-sm font-bold text-[#4E6E81]">42.0 °C</span>
+            <span className="text-[#64748B] block">Overcharge Auto Cut-Off</span>
+            <span className="text-sm font-bold text-[#4E6E81]">100% Full Charge</span>
           </div>
           <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
             <span className="text-[#64748B] block">Tamper Threshold</span>

@@ -25,6 +25,7 @@ import {
   normalizeServiceType,
   resolvePricingTier,
 } from '../constants/pricing.ts';
+import { formatSessionDateTime } from '../utils/format.ts';
 import type {
   ActiveSession,
   AdminStationActivity,
@@ -332,6 +333,48 @@ export async function ensureCatalogSeeded(): Promise<void> {
                 chargingPower: slot.chargingPower,
               },
             });
+        }
+      }
+
+      // Remove legacy thermal threshold seed alert and free any orphaned non-active busy slots
+      await db.delete(securityAlerts).where(eq(securityAlerts.id, 'alt-1'));
+
+      const now = new Date();
+      const [activeSessionSlots, activeTokenSlots] = await Promise.all([
+        db
+          .select({ slotNumber: sessions.slotNumber })
+          .from(sessions)
+          .where(
+            and(
+              eq(sessions.stationId, UNICHARGE_STATION_ID),
+              eq(sessions.status, 'active')
+            )
+          ),
+        db
+          .select({ slotNumber: lockerUnlockTokens.slotNumber })
+          .from(lockerUnlockTokens)
+          .where(
+            and(
+              eq(lockerUnlockTokens.stationId, UNICHARGE_STATION_ID),
+              eq(lockerUnlockTokens.used, false),
+              gt(lockerUnlockTokens.expiresAt, now)
+            )
+          ),
+      ]);
+      const occupiedSlotNumbers = new Set<number>([
+        ...activeSessionSlots.map((s) => s.slotNumber),
+        ...activeTokenSlots.map((t) => t.slotNumber),
+      ]);
+      const currentStationSlots = await db
+        .select()
+        .from(lockerSlots)
+        .where(eq(lockerSlots.stationId, UNICHARGE_STATION_ID));
+      for (const dbSlot of currentStationSlots) {
+        if (dbSlot.status === 'in_use' && !occupiedSlotNumbers.has(dbSlot.slotNumber)) {
+          await db
+            .update(lockerSlots)
+            .set({ status: 'available', isDoorOpen: false, isLocked: true })
+            .where(eq(lockerSlots.id, dbSlot.id));
         }
       }
 
@@ -1198,11 +1241,17 @@ async function releaseExpiredReservationsDb(): Promise<void> {
 export async function fetchStationsWithSlots(): Promise<KioskStation[]> {
   try {
     await releaseExpiredReservationsDb();
-    const stationRows = await db.select().from(stations).orderBy(asc(stations.id));
-    const slotRows = await db
-      .select()
-      .from(lockerSlots)
-      .orderBy(asc(lockerSlots.slotNumber));
+    const [stationRows, slotRows, activeSessionRows] = await Promise.all([
+      db.select().from(stations).orderBy(asc(stations.id)),
+      db.select().from(lockerSlots).orderBy(asc(lockerSlots.slotNumber)),
+      db
+        .select({
+          stationId: sessions.stationId,
+          chargingRateWatts: sessions.chargingRateWatts,
+        })
+        .from(sessions)
+        .where(eq(sessions.status, 'active')),
+    ]);
 
     return stationRows.map((st) => {
       const slotsForStation: LockerSlot[] = slotRows
@@ -1222,6 +1271,11 @@ export async function fetchStationsWithSlots(): Promise<KioskStation[]> {
       const availableCount = slotsForStation.filter(
         (s) => s.status === 'available'
       ).length;
+      const livePowerDrawWatts = Math.round(
+        activeSessionRows
+          .filter((r) => r.stationId === st.id)
+          .reduce((sum, r) => sum + Number(r.chargingRateWatts || 0), 0)
+      );
 
       return {
         id: st.id,
@@ -1239,7 +1293,7 @@ export async function fetchStationsWithSlots(): Promise<KioskStation[]> {
         image: st.image,
         isPopular: st.isPopular,
         online: st.online,
-        powerDrawWatts: st.powerDrawWatts,
+        powerDrawWatts: livePowerDrawWatts,
       };
     });
   } catch (error) {
@@ -1315,23 +1369,32 @@ export async function fetchUserSessionState(userUid: string): Promise<{
 
     const history: SessionHistoryItem[] = rows
       .filter((r) => r.status !== 'active')
-      .map((r) => ({
-        id: r.sessionId,
-        receiptNumber: r.receiptNumber || `USTP-REC-${r.id}`,
-        date: r.dateLabel || r.createdAt.toLocaleDateString(),
-        stationName: r.stationName,
-        slotNumber: r.slotNumber,
-        durationMinutes: r.durationMinutes,
-        totalFee: r.totalFee,
-        serviceType: normalizeServiceType(r.serviceType, r.slotNumber),
-        pricingTier: resolvePricingTier({
-          tierId: r.compartmentSize,
-          serviceType: r.serviceType,
-          durationMinutes: r.durationMinutes,
+      .map((r) => {
+        const storedLabel = (r.dateLabel || '').trim();
+        const isGenericJustNow =
+          !storedLabel || storedLabel.toLowerCase() === 'just now';
+        const formattedDate = isGenericJustNow
+          ? formatSessionDateTime(r.startTimeMs || r.createdAt)
+          : storedLabel;
+
+        return {
+          id: r.sessionId,
+          receiptNumber: r.receiptNumber || `USTP-REC-${r.id}`,
+          date: formattedDate,
+          stationName: r.stationName,
           slotNumber: r.slotNumber,
-        }).name,
-        status: 'Completed',
-      }));
+          durationMinutes: r.durationMinutes,
+          totalFee: r.totalFee,
+          serviceType: normalizeServiceType(r.serviceType, r.slotNumber),
+          pricingTier: resolvePricingTier({
+            tierId: r.compartmentSize,
+            serviceType: r.serviceType,
+            durationMinutes: r.durationMinutes,
+            slotNumber: r.slotNumber,
+          }).name,
+          status: 'Completed',
+        };
+      });
 
     return { activeSession, history };
   } catch (error) {
@@ -1929,7 +1992,7 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
 
   if (tokenRow.used) {
     throw new AuthValidationError(
-      'This QR unlock pass has already been redeemed. Reserve a locker to generate a new pass.'
+      'This QR unlock pass has already been redeemed. Avail a locker to generate a new pass.'
     );
   }
 
@@ -2390,7 +2453,7 @@ export async function recordTamperAlertDb(params: {
 
   await db.insert(securityAlerts).values({
     id: `alt-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
-    timestampLabel: 'Just now',
+    timestampLabel: formatSessionDateTime(new Date()),
     stationCode: station?.campusCode || UNICHARGE_STATION_CODE,
     stationName: station?.name || UNICHARGE_STATION_NAME,
     slotNumber: params.slotNumber,

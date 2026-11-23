@@ -9,28 +9,24 @@ import {
 } from '../constants/pricing.ts';
 import type { KioskStation, LockerSlot, SecurityAlert } from '../types/index.ts';
 
-const BUSY_SEED_SLOTS = new Set([2, 4, 6, 8, 17, 19, 20]); // 02, 04, 06, 08, S2, S4, S5
-
 export function buildStationCompartments(): LockerSlot[] {
   const slots: LockerSlot[] = [];
 
   for (let slotNumber = 1; slotNumber <= TOTAL_COMPARTMENT_COUNT; slotNumber++) {
     const category = getCompartmentCategory(slotNumber);
     const code = formatCompartmentCode(slotNumber);
-    const isBusy = BUSY_SEED_SLOTS.has(slotNumber);
-    const status = isBusy ? 'in_use' : 'available';
 
     slots.push({
       id: `unicharge-slot-${slotNumber}`,
       slotNumber,
       code,
       category,
-      status,
+      status: 'available',
       chargingPower:
         category === 'charging'
           ? '65W USB-C PD + 220V Outlet'
           : 'Secure Storage Compartment',
-      currentTemp: isBusy ? 31.4 : 28.2,
+      currentTemp: 28.2,
       isDoorOpen: false,
       isLocked: true,
     });
@@ -51,11 +47,11 @@ export const SEED_STATIONS: KioskStation[] = [
     walkMinutes: 1,
     distanceMeters: 0,
     totalSlots: TOTAL_COMPARTMENT_COUNT,
-    availableSlots: initialSlots.filter((s) => s.status === 'available').length,
+    availableSlots: initialSlots.length,
     image: '/src/assets/images/smart_locker_station_1794365237708.jpg',
     isPopular: true,
     online: true,
-    powerDrawWatts: 310,
+    powerDrawWatts: 0,
     mapCoords: { x: 50, y: 50 },
     coordinates: { lat: 8.4855, lng: 124.6565 },
     slots: initialSlots,
@@ -63,17 +59,6 @@ export const SEED_STATIONS: KioskStation[] = [
 ];
 
 export const SEED_SECURITY_ALERTS: SecurityAlert[] = [
-  {
-    id: 'alt-1',
-    timestamp: '10 mins ago',
-    stationCode: UNICHARGE_STATION_CODE,
-    stationName: UNICHARGE_STATION_NAME,
-    slotNumber: 8,
-    severity: 'warning',
-    type: 'Thermal Threshold',
-    message: 'Compartment #08 thermistor normalized after cooling fan cycle; charging nominal.',
-    resolved: false,
-  },
   {
     id: 'alt-2',
     timestamp: '42 mins ago',

@@ -10,3 +10,17 @@ export function formatDuration(minutes: number): string {
   }
   return `${hourText} ${remainingMinutes} ${remainingMinutes === 1 ? 'min' : 'mins'}`;
 }
+
+export function formatSessionDateTime(input: number | Date): string {
+  const parsed = input instanceof Date ? input : new Date(input);
+  const validDate = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Manila',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(validDate);
+}
+

@@ -14,6 +14,8 @@ import {
   PendingUnlockToken,
   DashboardNotification,
   AdminStationActivity,
+  PaymentMethod,
+  WalletTransaction,
 } from '../types';
 import {
   SEEDED_USERS,
@@ -83,7 +85,10 @@ interface UniChargeContextType {
   activeSession: ActiveSession | null;
   pendingUnlockToken: PendingUnlockToken | null;
   pendingSecondsLeft: number;
+  reservationTimeoutMessage: string | null;
+  clearReservationTimeout: () => void;
   sessionHistory: SessionHistoryItem[];
+  walletTransactions: WalletTransaction[];
   securityAlerts: SecurityAlert[];
   adminStationActivity: AdminStationActivity;
   hardwareKioskStationId: string;
@@ -138,7 +143,7 @@ interface UniChargeContextType {
   setSelectedDuration: (duration: number) => void;
   calculateFee: (tierOrService?: string, durationMinutes?: number) => number;
   generateUnlockToken: (
-    paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash'
+    paymentMethod: PaymentMethod
   ) => Promise<{ success: boolean; message: string; token?: PendingUnlockToken }>;
   regenerateUnlockToken: () => Promise<{
     success: boolean;
@@ -156,14 +161,44 @@ interface UniChargeContextType {
   cancelPendingUnlock: () => void;
   verifyKioskUnlock: (
     pinOrQrPayload: string,
-    kioskStationId?: string
-  ) => Promise<{ success: boolean; message: string }>;
+    kioskStationId?: string,
+    coinInsertedAmount?: number
+  ) => Promise<{
+    success: boolean;
+    message: string;
+    requiresCoinPayment?: boolean;
+    token?: PendingUnlockToken;
+    action?: 'unlocked' | 'retrieved';
+    receiptNumber?: string;
+    coinChangeCredited?: number;
+  }>;
+  unlockViaCoinWalkUp: (params: {
+    stationId?: string;
+    slotNumber: number;
+    serviceType: ServiceType;
+    tierId: string;
+    coinInsertedAmount: number;
+    customPin: string;
+  }) => Promise<{
+    success: boolean;
+    message: string;
+    retrievalPin?: string;
+    coinChangeCredited?: number;
+    coinChangeDispensed?: number;
+    session?: ActiveSession;
+  }>;
   unlockStationViaQr: (
     qrCode: string,
-    paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash'
+    paymentMethod: PaymentMethod
   ) => { success: boolean; message: string };
   endActiveSession: () => { success: boolean; message: string };
-  topUpWallet: (amount: number) => void;
+  topUpWallet: (
+    amount: number,
+    options?: {
+      source?: 'wallet' | 'gcash' | 'maya' | 'gotyme';
+      referenceCode?: string;
+    }
+  ) => Promise<{ success: boolean; message: string; referenceCode?: string }>;
   toggleBiometrics: () => void;
   togglePushNotifications: () => void;
   toggleOverchargeProtection: () => void;
@@ -190,7 +225,10 @@ interface UniChargeContextType {
   deleteNotification: (id: string) => Promise<void>;
   // Admin Methods
   adminRemoteUnlockSlot: (stationId: string, slotNumber: number) => void;
-  adminToggleSlotMaintenance: (stationId: string, slotNumber: number) => void;
+  adminToggleSlotMaintenance: (
+    stationId: string,
+    slotNumber: number
+  ) => Promise<{ success: boolean; message?: string }>;
   adminProvisionStaff: (params: {
     name: string;
     email: string;
@@ -203,8 +241,8 @@ interface UniChargeContextType {
 const UniChargeContext = createContext<UniChargeContextType | undefined>(undefined);
 
 const STORAGE_KEYS = {
-  users: 'unicharge_users_v3',
-  currentUserId: 'unicharge_current_user_id_v3',
+  users: 'unicharge_users_v4',
+  currentUserId: 'unicharge_current_user_id_v4',
   sessions: 'unicharge_sessions_by_user_v3',
   history: 'unicharge_history_by_user_v3',
 };
@@ -292,8 +330,13 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   >(() =>
     readStorage<Record<string, SessionHistoryItem[]>>(STORAGE_KEYS.history, {})
   );
+  const [walletTxByUserId, setWalletTxByUserId] = useState<
+    Record<string, WalletTransaction[]>
+  >({});
   const [pendingUnlockToken, setPendingUnlockToken] = useState<PendingUnlockToken | null>(null);
   const [pendingSecondsLeft, setPendingSecondsLeft] = useState<number>(0);
+  const [reservationTimeoutMessage, setReservationTimeoutMessage] = useState<string | null>(null);
+  const expiredHandledTokenRef = useRef<string | null>(null);
   const [securityAlerts, setSecurityAlerts] = useState<SecurityAlert[]>(INITIAL_SECURITY_ALERTS);
   const [adminStationActivity, setAdminStationActivity] = useState<AdminStationActivity>({
     activeSessions: [],
@@ -347,6 +390,33 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     return res.json();
   }, []);
 
+  const publicKioskFetch = useCallback(async (url: string, init: RequestInit = {}) => {
+    const fbUser = auth.currentUser;
+    let token = idTokenRef.current;
+    if (!token?.startsWith('uc_') && fbUser) {
+      token = await fbUser.getIdToken();
+    }
+    if (token) {
+      idTokenRef.current = token;
+    }
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...((init.headers as Record<string, string>) || {}),
+    };
+    if (token && isBackendSessionRef.current) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    const res = await fetch(url, {
+      ...init,
+      headers,
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `Request failed (${res.status})`);
+    }
+    return res.json();
+  }, []);
+
   const applyBootstrapPayload = useCallback(
     (data: {
       user: UserAccount;
@@ -355,6 +425,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       securityAlerts?: SecurityAlert[];
       activeSession?: ActiveSession | null;
       sessionHistory?: SessionHistoryItem[];
+      walletTransactions?: WalletTransaction[];
       pendingUnlockToken?: PendingUnlockToken | null;
       stationActivity?: AdminStationActivity;
     }): UserAccount => {
@@ -391,6 +462,10 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setHistoryByUserId((prev) => ({
         ...prev,
         [loadedUser.id]: Array.isArray(data.sessionHistory) ? data.sessionHistory : [],
+      }));
+      setWalletTxByUserId((prev) => ({
+        ...prev,
+        [loadedUser.id]: Array.isArray(data.walletTransactions) ? data.walletTransactions : [],
       }));
       if (data.pendingUnlockToken !== undefined) {
         setPendingUnlockToken(data.pendingUnlockToken);
@@ -515,6 +590,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             [syncedUser.id]: data.sessionHistory as SessionHistoryItem[],
           }));
         }
+        if (Array.isArray(data.walletTransactions)) {
+          setWalletTxByUserId((prevMap) => ({
+            ...prevMap,
+            [syncedUser.id]: data.walletTransactions as WalletTransaction[],
+          }));
+        }
         if (data.pendingUnlockToken !== undefined) {
           setPendingUnlockToken(data.pendingUnlockToken as PendingUnlockToken | null);
         }
@@ -526,6 +607,27 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   }, [authorizedFetch]);
 
+  const syncPublicStationState = useCallback(async () => {
+    if (syncInFlightRef.current) return;
+    syncInFlightRef.current = true;
+    try {
+      const res = await fetch('/api/kiosk/public-state');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data?.stations) && data.stations.length > 0) {
+        const nextStations = data.stations as KioskStation[];
+        setStations(nextStations);
+        setSelectedStation(
+          (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
+        );
+      }
+    } catch {
+      // Ignore transient polling failures
+    } finally {
+      syncInFlightRef.current = false;
+    }
+  }, []);
+
   const notifyStationSync = useCallback(() => {
     try {
       syncChannelRef.current?.postMessage({ type: 'station-updated', at: Date.now() });
@@ -535,26 +637,40 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }, []);
 
   useEffect(() => {
-    if (!isAuthenticated || !isBackendSessionRef.current) return;
+    const shouldSyncAuth = isAuthenticated && isBackendSessionRef.current;
+    const shouldSyncPublicKiosk = !isAuthenticated && currentRoute === '/kiosk';
+    if (!shouldSyncAuth && !shouldSyncPublicKiosk) return;
+
+    const runSync = () => {
+      if (shouldSyncAuth) {
+        void syncStationState();
+      } else {
+        void syncPublicStationState();
+      }
+    };
+
+    if (shouldSyncPublicKiosk) {
+      runSync();
+    }
 
     let channel: BroadcastChannel | null = null;
     if (typeof BroadcastChannel !== 'undefined') {
       channel = new BroadcastChannel('unicharge_station_sync');
       syncChannelRef.current = channel;
       channel.onmessage = () => {
-        void syncStationState();
+        runSync();
       };
     }
 
     const intervalId = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
-        void syncStationState();
+        runSync();
       }
     }, 3000);
 
     const handleFocusOrVisibility = () => {
       if (document.visibilityState === 'visible') {
-        void syncStationState();
+        runSync();
       }
     };
     window.addEventListener('focus', handleFocusOrVisibility);
@@ -567,7 +683,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       channel?.close();
       syncChannelRef.current = null;
     };
-  }, [isAuthenticated, syncStationState]);
+  }, [currentRoute, isAuthenticated, syncPublicStationState, syncStationState]);
 
   // Real-time Firestore onSnapshot subscription (only when Firebase Auth is verified & active)
   useEffect(() => {
@@ -607,6 +723,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const student = currentUser ?? INITIAL_STUDENT;
   const activeSession = currentUser ? (sessionsByUserId[currentUser.id] ?? null) : null;
   const sessionHistory = currentUser ? (historyByUserId[currentUser.id] ?? []) : [];
+  const walletTransactions = currentUser ? (walletTxByUserId[currentUser.id] ?? []) : [];
 
   const clearAuthSuccess = useCallback(() => setAuthSuccessMessage(null), []);
 
@@ -695,7 +812,11 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     };
   }, [currentUser, enforceRouteGuard]);
 
-  // 60-second Countdown Timer for Pending QR Unlock Token
+  const clearReservationTimeout = useCallback(() => {
+    setReservationTimeoutMessage(null);
+  }, []);
+
+  // 5-Minute Countdown Timer for Pending QR Unlock Token + Auto-Release Sync
   useEffect(() => {
     if (!pendingUnlockToken) {
       setPendingSecondsLeft(0);
@@ -705,14 +826,49 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     const updateLeft = () => {
       const diff = Math.max(0, Math.ceil((pendingUnlockToken.expiresAt - Date.now()) / 1000));
       setPendingSecondsLeft(diff);
+
+      if (diff === 0 && expiredHandledTokenRef.current !== pendingUnlockToken.tokenId) {
+        expiredHandledTokenRef.current = pendingUnlockToken.tokenId;
+        const expiredSlot = pendingUnlockToken.slotNumber;
+        const expiredStationId = pendingUnlockToken.stationId;
+        setReservationTimeoutMessage(
+          `Reservation timed out (5-minute limit) — ${formatCompartmentLabel(
+            expiredSlot
+          )} released with ₱0 charged.`
+        );
+
+        if (isBackendSessionRef.current) {
+          window.setTimeout(() => {
+            void syncStationState();
+            notifyStationSync();
+          }, 700);
+        } else {
+          setStations((prevStations) =>
+            prevStations.map((st) => {
+              if (st.id !== expiredStationId) return st;
+              const updatedSlots = st.slots.map((s) =>
+                s.slotNumber === expiredSlot
+                  ? { ...s, status: 'available' as const, isDoorOpen: false, isLocked: true }
+                  : s
+              );
+              return {
+                ...st,
+                slots: updatedSlots,
+                availableSlots: updatedSlots.filter((s) => s.status === 'available').length,
+              };
+            })
+          );
+          setPendingUnlockToken(null);
+        }
+      }
     };
 
     updateLeft();
     const timer = setInterval(updateLeft, 500);
     return () => clearInterval(timer);
-  }, [pendingUnlockToken]);
+  }, [pendingUnlockToken, notifyStationSync, syncStationState]);
 
-  // Active Session Timer & Dynamic Telemetry
+  // Active Session Timer & Dynamic Telemetry (keeps locker locked & stops charging at 00:00)
   useEffect(() => {
     if (!activeSession || activeSession.status !== 'active' || !currentUser) return;
     const uid = currentUser.id;
@@ -730,7 +886,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         const tempVariance = Math.sin(Date.now() / 15000) * 1.2;
         const currentTemp = +(29.5 + tempVariance).toFixed(1);
         const wattage =
-          simulatedCurrentBattery > 85
+          prev.serviceType === 'storage' || newRemaining === 0
+            ? 0
+            : simulatedCurrentBattery > 85
             ? 18.5
             : 42.0 + Math.floor(Math.sin(Date.now() / 4000) * 4);
 
@@ -739,13 +897,15 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             ? {
                 ...prev,
                 remainingSeconds: 0,
-                batteryCurrent: 100,
-                status: 'completed',
+                batteryCurrent: prev.serviceType === 'charging' ? 100 : prev.batteryCurrent,
+                chargingRateWatts: 0,
+                isOverchargeProtectionActive: true,
+                status: 'active',
               }
             : {
                 ...prev,
                 remainingSeconds: newRemaining,
-                batteryCurrent: simulatedCurrentBattery,
+                batteryCurrent: prev.serviceType === 'charging' ? simulatedCurrentBattery : prev.batteryCurrent,
                 lockerTemperature: currentTemp,
                 chargingRateWatts: wattage,
               };
@@ -1155,9 +1315,34 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   // STEP 1 of Secure IoT Unlock: Generate time-sensitive 5-minute QR / 6-digit PIN & email pass
   const generateUnlockToken = async (
-    paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash'
+    paymentMethod: PaymentMethod
   ): Promise<{ success: boolean; message: string; token?: PendingUnlockToken }> => {
     sound.playTap();
+    setReservationTimeoutMessage(null);
+
+    if (currentUser?.role === 'admin') {
+      return {
+        success: false,
+        message: 'Admin accounts cannot avail student compartments. Kiosk usage is restricted to students.',
+      };
+    }
+
+    if (activeSession && activeSession.status === 'active') {
+      return {
+        success: false,
+        message: `You already have an active session in ${formatCompartmentLabel(
+          activeSession.slotNumber
+        )}. Retrieve your item and end your session before availing another compartment.`,
+      };
+    }
+
+    if (paymentMethod === 'cash') {
+      return {
+        success: false,
+        message:
+          'Signed-in bookings accept online e-payments only (Campus E-Wallet, GCash, Maya, or GoTyme Bank).',
+      };
+    }
 
     const slotToBook =
       (selectedSlot &&
@@ -1187,7 +1372,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         success: false,
         message: `Insufficient campus e-wallet balance (₱${student.walletBalance.toFixed(
           2
-        )}). Please reload ₱ or choose GCash/Maya/Coin Slot.`,
+        )}). Please reload ₱ or choose GCash, Maya, or GoTyme Bank.`,
       };
     }
 
@@ -1393,23 +1578,114 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   };
 
-  // STEP 2 of Secure IoT Unlock: Triggered ONLY when physical kiosk scanner/PIN pad verifies the token!
+  // STEP 2 of Secure IoT Unlock: Triggered ONLY when physical kiosk scanner/PIN pad/coin acceptor verifies the token or retrieves an active locker!
   const verifyKioskUnlock = async (
     pinOrQrPayload: string,
-    kioskStationId?: string
-  ): Promise<{ success: boolean; message: string }> => {
+    kioskStationId?: string,
+    coinInsertedAmount?: number
+  ): Promise<{
+    success: boolean;
+    message: string;
+    requiresCoinPayment?: boolean;
+    token?: PendingUnlockToken;
+    action?: 'unlocked' | 'retrieved';
+    receiptNumber?: string;
+    coinChangeCredited?: number;
+  }> => {
     sound.playBeep();
+    setReservationTimeoutMessage(null);
     const targetKioskId = kioskStationId || hardwareKioskStationId;
 
-    if (isBackendSessionRef.current) {
+    if (isBackendSessionRef.current || !currentUser) {
       try {
-        const data = await authorizedFetch('/api/kiosk/verify-unlock', {
+        const data = await publicKioskFetch('/api/kiosk/verify-unlock', {
           method: 'POST',
           body: JSON.stringify({
             pinOrQrPayload: pinOrQrPayload.trim(),
             kioskStationId: targetKioskId,
+            ...(typeof coinInsertedAmount === 'number' ? { coinInsertedAmount } : {}),
           }),
         });
+
+        if (data?.requiresCoinPayment && data?.token) {
+          return {
+            success: false,
+            requiresCoinPayment: true,
+            token: data.token as PendingUnlockToken,
+            message:
+              data.message ||
+              `Please insert ₱${Number(data.token.totalFee).toFixed(2)} in coins to unlock.`,
+          };
+        }
+
+        if (data?.action === 'retrieved') {
+          const updatedStations = Array.isArray(data.stations)
+            ? (data.stations as KioskStation[])
+            : null;
+          const retrievedSlot = Number(data.retrievedSlotNumber);
+          const receiptNumber = String(data.receiptNumber || `USTP-REC-${Date.now()}`);
+
+          sound.playSolenoidRelease();
+
+          if (updatedStations && updatedStations.length > 0) {
+            setStations(updatedStations);
+            setSelectedStation(
+              (prev) => updatedStations.find((s) => s.id === prev.id) || updatedStations[0]
+            );
+          }
+
+          if (activeSession && (!retrievedSlot || activeSession.slotNumber === retrievedSlot)) {
+            const historyEntry: SessionHistoryItem = {
+              id: `hist-${Date.now()}`,
+              receiptNumber,
+              date: formatSessionDateTime(new Date()),
+              stationName: activeSession.stationName,
+              slotNumber: activeSession.slotNumber,
+              durationMinutes: activeSession.durationMinutes,
+              totalFee: activeSession.totalFee,
+              serviceType: activeSession.serviceType,
+              pricingTier: activeSession.pricingTier,
+              status: 'Completed',
+            };
+            if (currentUser) {
+              const uid = currentUser.id;
+              setHistoryByUserId((prevMap) => ({
+                ...prevMap,
+                [uid]: [historyEntry, ...(prevMap[uid] ?? [])],
+              }));
+            }
+            setActiveSessionForCurrentUser(null);
+          }
+
+          setHardwareKioskStationId(targetKioskId);
+          setIsKioskDoorOpen(true);
+          if (retrievedSlot) {
+            setActiveKioskSlotReleased(retrievedSlot);
+          }
+          notifyStationSync();
+          if (isBackendSessionRef.current) {
+            void syncStationState();
+          } else {
+            void syncPublicStationState();
+          }
+
+          confetti({
+            particleCount: 65,
+            spread: 65,
+            origin: { y: 0.55 },
+            colors: ['#5BC496', '#4E6E81', '#FFFFFF'],
+          });
+
+          return {
+            success: true,
+            action: 'retrieved',
+            receiptNumber,
+            message:
+              data.message ||
+              `${formatCompartmentLabel(retrievedSlot)} unlocked! Please retrieve your belongings.`,
+          };
+        }
+
         if (!data?.session) {
           return {
             success: false,
@@ -1422,6 +1698,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         const updatedStations = Array.isArray(data.stations)
           ? (data.stations as KioskStation[])
           : null;
+        const coinChangeCredited = Number(data.coinChangeCredited || 0);
 
         sound.playSolenoidRelease();
         setTimeout(() => {
@@ -1433,6 +1710,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           setUsers((prev) =>
             prev.map((u) => (u.id === updatedUser.id ? { ...u, ...updatedUser } : u))
           );
+          if (Array.isArray(data.walletTransactions)) {
+            setWalletTxByUserId((prevMap) => ({
+              ...prevMap,
+              [updatedUser.id]: data.walletTransactions as WalletTransaction[],
+            }));
+          }
         }
         if (updatedStations && updatedStations.length > 0) {
           setStations(updatedStations);
@@ -1457,6 +1740,8 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
         return {
           success: true,
+          action: 'unlocked',
+          coinChangeCredited,
           message:
             data.message ||
             `Kiosk Verified! ${formatCompartmentLabel(
@@ -1470,17 +1755,34 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
     }
 
+    const cleaned = pinOrQrPayload.trim();
+
     if (!pendingUnlockToken) {
+      if (
+        activeSession &&
+        activeSession.stationId === targetKioskId &&
+        (cleaned === activeSession.qrVerificationCode ||
+          cleaned === activeSession.sessionId ||
+          (/^\d{6}$/.test(cleaned) &&
+            activeSession.qrVerificationCode.includes(`PIN-${cleaned}`)))
+      ) {
+        const res = endActiveSession();
+        return {
+          success: res.success,
+          action: 'retrieved',
+          message: res.message,
+        };
+      }
       return {
         success: false,
-        message: 'No pending QR unlock authorization found. Generate an unlock QR from Avail a Locker first.',
+        message: 'No pending QR unlock authorization found. Generate an unlock QR from Avail a Locker or use Walk-Up Coin.',
       };
     }
 
     if (Date.now() > pendingUnlockToken.expiresAt) {
       return {
         success: false,
-        message: 'QR verification token expired (5-minute limit). Please regenerate a fresh Unlock QR.',
+        message: 'Reservation timed out (5-minute limit) — compartment released with ₱0 charged. Please avail again.',
       };
     }
 
@@ -1491,7 +1793,6 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       };
     }
 
-    const cleaned = pinOrQrPayload.trim();
     const matchesToken =
       cleaned === pendingUnlockToken.pinCode ||
       cleaned === pendingUnlockToken.qrPayload ||
@@ -1504,7 +1805,25 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       };
     }
 
-    if (pendingUnlockToken.paymentMethod === 'wallet') {
+    if (pendingUnlockToken.paymentMethod === 'cash') {
+      const inserted = Number(coinInsertedAmount ?? 0);
+      if (inserted < pendingUnlockToken.totalFee) {
+        return {
+          success: false,
+          requiresCoinPayment: true,
+          token: pendingUnlockToken,
+          message: `Insert ₱${pendingUnlockToken.totalFee.toFixed(
+            2
+          )} in coins into the kiosk coin slot to unlock ${formatCompartmentLabel(
+            pendingUnlockToken.slotNumber
+          )}.`,
+        };
+      }
+      const change = Math.max(0, +(inserted - pendingUnlockToken.totalFee).toFixed(2));
+      if (change > 0) {
+        updateCurrentUserState((u) => ({ ...u, walletBalance: u.walletBalance + change }));
+      }
+    } else if (pendingUnlockToken.paymentMethod === 'wallet') {
       if (student.walletBalance < pendingUnlockToken.totalFee) {
         return {
           success: false,
@@ -1578,16 +1897,265 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     return {
       success: true,
+      action: 'unlocked',
       message: `Kiosk Verified! ${formatCompartmentLabel(
         newSession.slotNumber
       )} Solenoid Unlatched at ${newSession.stationName}.`,
     };
   };
 
+  const unlockViaCoinWalkUp = async (params: {
+    stationId?: string;
+    slotNumber: number;
+    serviceType: ServiceType;
+    tierId: string;
+    coinInsertedAmount: number;
+    customPin: string;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    retrievalPin?: string;
+    coinChangeCredited?: number;
+    coinChangeDispensed?: number;
+    session?: ActiveSession;
+  }> => {
+    sound.playBeep();
+    setReservationTimeoutMessage(null);
+    if (currentUser?.role === 'admin') {
+      return {
+        success: false,
+        message: 'Admin accounts cannot avail kiosk compartments. Kiosk self-service is restricted to students and walk-in users.',
+      };
+    }
+    if (activeSession && activeSession.status === 'active') {
+      return {
+        success: false,
+        message: `You already have an active session in ${formatCompartmentLabel(
+          activeSession.slotNumber
+        )}. Retrieve your item and end your session before opening another locker.`,
+      };
+    }
+    const targetStationId = params.stationId || hardwareKioskStationId;
+    const cleanCustomPin = (params.customPin || '').trim();
+
+    if (!/^\d{6}$/.test(cleanCustomPin)) {
+      return {
+        success: false,
+        message: 'Please enter your own 6-digit Retrieval PIN (numbers 0–9) before unlatching.',
+      };
+    }
+
+    if (isBackendSessionRef.current || !currentUser) {
+      try {
+        const data = await publicKioskFetch('/api/kiosk/coin-unlock', {
+          method: 'POST',
+          body: JSON.stringify({
+            stationId: targetStationId,
+            slotNumber: params.slotNumber,
+            serviceType: params.serviceType,
+            tierId: params.tierId,
+            coinInsertedAmount: params.coinInsertedAmount,
+            customPin: cleanCustomPin,
+          }),
+        });
+        if (!data?.session) {
+          return {
+            success: false,
+            message: 'Unable to process walk-up coin unlock.',
+          };
+        }
+
+        const verifiedSession = data.session as ActiveSession;
+        const updatedUser = data.user as UserAccount | null;
+        const updatedStations = Array.isArray(data.stations)
+          ? (data.stations as KioskStation[])
+          : null;
+        const retrievalPin = String(data.retrievalPin || cleanCustomPin);
+        const coinChangeCredited = Number(data.coinChangeCredited || 0);
+        const coinChangeDispensed = Number(data.coinChangeDispensed || 0);
+        const isCurrentUserOwner = Boolean(currentUser && data.ownerUid === currentUser.id);
+
+        sound.playSolenoidRelease();
+        setTimeout(() => {
+          sound.playChargingConnected();
+        }, 450);
+
+        if (updatedUser && currentUser && updatedUser.id === currentUser.id) {
+          setCurrentUser(updatedUser);
+          setUsers((prev) =>
+            prev.map((u) => (u.id === updatedUser.id ? { ...u, ...updatedUser } : u))
+          );
+          if (Array.isArray(data.walletTransactions)) {
+            setWalletTxByUserId((prevMap) => ({
+              ...prevMap,
+              [updatedUser.id]: data.walletTransactions as WalletTransaction[],
+            }));
+          }
+        }
+        if (updatedStations && updatedStations.length > 0) {
+          setStations(updatedStations);
+          setSelectedStation(
+            (prev) => updatedStations.find((s) => s.id === prev.id) || updatedStations[0]
+          );
+        }
+
+        setHardwareKioskStationId(verifiedSession.stationId);
+        setIsKioskDoorOpen(true);
+        setActiveKioskSlotReleased(verifiedSession.slotNumber);
+        if (isCurrentUserOwner) {
+          setActiveSessionForCurrentUser(verifiedSession);
+          setPendingUnlockToken(null);
+        }
+        notifyStationSync();
+        if (isBackendSessionRef.current) {
+          void syncStationState();
+        } else {
+          void syncPublicStationState();
+        }
+
+        confetti({
+          particleCount: 55,
+          spread: 60,
+          origin: { y: 0.6 },
+          colors: ['#5BC496', '#4E6E81', '#FFFFFF'],
+        });
+
+        return {
+          success: true,
+          retrievalPin,
+          coinChangeCredited,
+          coinChangeDispensed,
+          session: verifiedSession,
+          message:
+            data.message ||
+            `Coins Accepted! ${formatCompartmentLabel(
+              verifiedSession.slotNumber
+            )} unlatched. Retrieval PIN: ${retrievalPin}.`,
+        };
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Unable to process coin payment.';
+        return { success: false, message };
+      }
+    }
+
+    if (activeSession && activeSession.status === 'active') {
+      return {
+        success: false,
+        message: `You already have an active session on ${formatCompartmentLabel(
+          activeSession.slotNumber
+        )}. Retrieve it first before opening another compartment.`,
+      };
+    }
+
+    const tier = resolvePricingTier({
+      tierId: params.tierId,
+      serviceType: params.serviceType,
+      slotNumber: params.slotNumber,
+    });
+    if (params.coinInsertedAmount < tier.fee) {
+      return {
+        success: false,
+        message: `Insert at least ₱${tier.fee.toFixed(2)} in coins for ${tier.name}.`,
+      };
+    }
+
+    const targetStation = stations.find((s) => s.id === targetStationId) || selectedStation;
+    const slotObj = targetStation.slots.find((s) => s.slotNumber === params.slotNumber);
+    if (!slotObj || slotObj.status !== 'available') {
+      return {
+        success: false,
+        message: `${formatCompartmentLabel(params.slotNumber)} is not available.`,
+      };
+    }
+
+    const change = Math.max(0, +(params.coinInsertedAmount - tier.fee).toFixed(2));
+    if (change > 0 && currentUser) {
+      updateCurrentUserState((u) => ({ ...u, walletBalance: u.walletBalance + change }));
+    }
+
+    const retrievalPin = cleanCustomPin;
+    const compartmentCode = formatCompartmentCode(params.slotNumber);
+    const newSession: ActiveSession = {
+      sessionId: `USTP-SES-${Math.floor(10000 + Math.random() * 90000)}`,
+      stationId: targetStation.id,
+      stationName: targetStation.name,
+      building: targetStation.building,
+      slotNumber: params.slotNumber,
+      serviceType: tier.serviceType,
+      pricingTier: tier.name,
+      startTime: Date.now(),
+      durationMinutes: tier.durationMinutes,
+      remainingSeconds: tier.durationMinutes * 60,
+      totalFee: tier.fee,
+      batteryInitial: 38,
+      batteryCurrent: 38,
+      chargingRateWatts: tier.serviceType === 'storage' ? 0 : 58.4,
+      lockerTemperature: 28.6,
+      isOverchargeProtectionActive: true,
+      isTamperAlertArmed: true,
+      status: 'active',
+      qrVerificationCode: `UNICHARGE|${targetStation.campusCode}|SLOT-${compartmentCode}|PIN-${retrievalPin}|COIN-LOCAL`,
+    };
+
+    sound.playSolenoidRelease();
+    setTimeout(() => {
+      sound.playChargingConnected();
+    }, 450);
+
+    setStations((prevStations) =>
+      prevStations.map((st) => {
+        if (st.id === targetStation.id) {
+          const updatedSlots = st.slots.map((s) =>
+            s.slotNumber === params.slotNumber
+              ? { ...s, status: 'in_use' as const, isDoorOpen: true, isLocked: false }
+              : s
+          );
+          return {
+            ...st,
+            slots: updatedSlots,
+            availableSlots: updatedSlots.filter((s) => s.status === 'available').length,
+          };
+        }
+        return st;
+      })
+    );
+
+    setHardwareKioskStationId(targetStation.id);
+    setIsKioskDoorOpen(true);
+    setActiveKioskSlotReleased(params.slotNumber);
+    setActiveSessionForCurrentUser(newSession);
+    setPendingUnlockToken(null);
+
+    confetti({
+      particleCount: 55,
+      spread: 60,
+      origin: { y: 0.6 },
+      colors: ['#5BC496', '#4E6E81', '#FFFFFF'],
+    });
+
+    return {
+      success: true,
+      retrievalPin,
+      coinChangeCredited: currentUser ? change : 0,
+      coinChangeDispensed: currentUser ? 0 : change,
+      session: newSession,
+      message: `Coins Accepted (₱${tier.fee.toFixed(2)})! ${formatCompartmentLabel(
+        params.slotNumber
+      )} unlatched. Retrieval PIN: ${retrievalPin}.${
+        change > 0
+          ? currentUser
+            ? ` Change ₱${change.toFixed(2)} credited to Campus E-Wallet.`
+            : ` Coin change dispensed: ₱${change.toFixed(2)}.`
+          : ''
+      }`,
+    };
+  };
+
   // Used by the Expo Mobile Companion camera QR scanner screen (the phone scanning the kiosk's display QR)
   const unlockStationViaQr = (
     qrCode: string,
-    paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash'
+    paymentMethod: PaymentMethod
   ): { success: boolean; message: string } => {
     sound.playBeep();
 
@@ -1806,8 +2374,8 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       })
     );
 
-    if (isBackendSessionRef.current) {
-      authorizedFetch('/api/kiosk/door-state', {
+    if (isBackendSessionRef.current || !currentUser) {
+      publicKioskFetch('/api/kiosk/door-state', {
         method: 'POST',
         body: JSON.stringify({
           stationId: hardwareKioskStationId,
@@ -1829,14 +2397,102 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   };
 
-  const topUpWallet = (amount: number) => {
+  const topUpWallet = async (
+    amount: number,
+    options?: {
+      source?: 'wallet' | 'gcash' | 'maya' | 'gotyme';
+      referenceCode?: string;
+    }
+  ): Promise<{ success: boolean; message: string; referenceCode?: string }> => {
     sound.playTap();
-    updateCurrentUserState((u) => ({ ...u, walletBalance: u.walletBalance + amount }));
+    const source =
+      options?.source === 'gcash' || options?.source === 'maya' || options?.source === 'gotyme'
+        ? options.source
+        : 'wallet';
+    const prefix =
+      source === 'gcash'
+        ? 'GCASH'
+        : source === 'maya'
+        ? 'MAYA'
+        : source === 'gotyme'
+        ? 'GOTYME'
+        : 'WLT';
+    const platformLabel =
+      source === 'gcash'
+        ? 'GCash'
+        : source === 'maya'
+        ? 'Maya'
+        : source === 'gotyme'
+        ? 'GoTyme Bank'
+        : 'Campus E-Wallet';
+    const cleanRef =
+      options?.referenceCode?.trim() || `${prefix}-${Math.floor(100000 + Math.random() * 900000)}`;
+
+    if (!Number.isFinite(amount) || amount < 10 || amount > 5000) {
+      return { success: false, message: 'Reload amount must be between ₱10 and ₱5,000.' };
+    }
+
     if (isBackendSessionRef.current) {
-      authorizedFetch('/api/wallet/topup', {
-        method: 'POST',
-        body: JSON.stringify({ amount }),
-      }).catch((err) => console.error('Wallet top-up sync failed:', err));
+      try {
+        const data = await authorizedFetch('/api/wallet/topup', {
+          method: 'POST',
+          body: JSON.stringify({ amount, source, referenceCode: cleanRef }),
+        });
+        if (data?.user) {
+          const updatedUser = data.user as UserAccount;
+          setCurrentUser(updatedUser);
+          setUsers((prev) =>
+            prev.map((u) => (u.id === updatedUser.id ? { ...u, ...updatedUser } : u))
+          );
+          if (Array.isArray(data.walletTransactions)) {
+            setWalletTxByUserId((prevMap) => ({
+              ...prevMap,
+              [updatedUser.id]: data.walletTransactions as WalletTransaction[],
+            }));
+          }
+        }
+        confetti({
+          particleCount: 30,
+          spread: 50,
+          origin: { y: 0.7 },
+          colors: ['#5BC496', '#4E6E81'],
+        });
+        return {
+          success: true,
+          referenceCode: cleanRef,
+          message: `₱${amount.toFixed(2)} credited via ${platformLabel} (Ref ${cleanRef}).`,
+        };
+      } catch (err: unknown) {
+        return {
+          success: false,
+          message: err instanceof Error ? err.message : 'Wallet reload failed.',
+        };
+      }
+    }
+
+    const nextBalance = +(student.walletBalance + amount).toFixed(2);
+    updateCurrentUserState((u) => ({ ...u, walletBalance: nextBalance }));
+    if (currentUser) {
+      const uid = currentUser.id;
+      const nowMs = Date.now();
+      const localTx: WalletTransaction = {
+        id: `WLT-${nowMs}`,
+        txId: `WLT-${nowMs}`,
+        userUid: uid,
+        kind: 'reload',
+        paymentSource: source,
+        title: `Campus E-Wallet Reload (${platformLabel})`,
+        referenceCode: cleanRef,
+        amount,
+        walletDelta: amount,
+        balanceAfter: nextBalance,
+        date: formatSessionDateTime(new Date(nowMs)),
+        createdAtMs: nowMs,
+      };
+      setWalletTxByUserId((prevMap) => ({
+        ...prevMap,
+        [uid]: [localTx, ...(prevMap[uid] ?? [])],
+      }));
     }
     confetti({
       particleCount: 30,
@@ -1844,6 +2500,11 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       origin: { y: 0.7 },
       colors: ['#5BC496', '#4E6E81'],
     });
+    return {
+      success: true,
+      referenceCode: cleanRef,
+      message: `₱${amount.toFixed(2)} credited via ${platformLabel} (Ref ${cleanRef}).`,
+    };
   };
 
   const toggleBiometrics = () => {
@@ -2103,8 +2764,8 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       ...prev,
     ]);
 
-    if (isBackendSessionRef.current) {
-      authorizedFetch('/api/kiosk/tamper-alert', {
+    if (isBackendSessionRef.current || !currentUser) {
+      publicKioskFetch('/api/kiosk/tamper-alert', {
         method: 'POST',
         body: JSON.stringify({
           stationId: targetStationId,
@@ -2195,19 +2856,40 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   };
 
-  const adminToggleSlotMaintenance = (stationId: string, slotNumber: number) => {
-    if (currentUser?.role !== 'admin') return;
+  const adminToggleSlotMaintenance = async (
+    stationId: string,
+    slotNumber: number
+  ): Promise<{ success: boolean; message?: string }> => {
+    if (currentUser?.role !== 'admin') {
+      return { success: false, message: 'Admin privileges required.' };
+    }
     sound.playTap();
-    let computedStatus: LockerSlot['status'] = 'available';
+
+    const targetStation = stations.find((st) => st.id === stationId);
+    const currentSlot = targetStation?.slots.find((s) => s.slotNumber === slotNumber);
+    if (!currentSlot) {
+      return { success: false, message: 'Compartment not found.' };
+    }
+    if (currentSlot.status === 'in_use') {
+      return {
+        success: false,
+        message: `${formatCompartmentLabel(
+          slotNumber
+        )} currently has an active session. Force Unlock it first before enabling Maintenance.`,
+      };
+    }
+
+    const nextStatus: LockerSlot['status'] =
+      currentSlot.status === 'maintenance' ? 'available' : 'maintenance';
+
     setStations((prev) =>
       prev.map((st) => {
         if (st.id !== stationId) return st;
-        const updatedSlots = st.slots.map((s) => {
-          if (s.slotNumber !== slotNumber) return s;
-          const nextStatus = s.status === 'maintenance' ? 'available' : 'maintenance';
-          computedStatus = nextStatus as LockerSlot['status'];
-          return { ...s, status: computedStatus };
-        });
+        const updatedSlots = st.slots.map((s) =>
+          s.slotNumber === slotNumber
+            ? { ...s, status: nextStatus, isDoorOpen: false, isLocked: true }
+            : s
+        );
         return {
           ...st,
           slots: updatedSlots,
@@ -2217,26 +2899,40 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     );
 
     if (isBackendSessionRef.current) {
-      authorizedFetch('/api/admin/slots/update', {
-        method: 'POST',
-        body: JSON.stringify({
-          stationId,
-          slotNumber,
-          status: computedStatus,
-        }),
-      })
-        .then((data) => {
-          if (Array.isArray(data?.stations) && data.stations.length > 0) {
-            const nextStations = data.stations as KioskStation[];
-            setStations(nextStations);
-            setSelectedStation(
-              (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
-            );
-          }
-          notifyStationSync();
-        })
-        .catch((err) => console.error('Admin maintenance sync failed:', err));
+      try {
+        const data = await authorizedFetch('/api/admin/slots/update', {
+          method: 'POST',
+          body: JSON.stringify({
+            stationId,
+            slotNumber,
+            status: nextStatus,
+            isDoorOpen: false,
+            isLocked: true,
+          }),
+        });
+        if (Array.isArray(data?.stations) && data.stations.length > 0) {
+          const nextStations = data.stations as KioskStation[];
+          setStations(nextStations);
+          setSelectedStation(
+            (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
+          );
+        }
+        notifyStationSync();
+      } catch (err: unknown) {
+        const message =
+          err instanceof Error ? err.message : 'Failed to update compartment status.';
+        console.error('Admin maintenance sync failed:', err);
+        void syncStationState();
+        return { success: false, message };
+      }
     }
+
+    return {
+      success: true,
+      message: `${formatCompartmentLabel(slotNumber)} ${
+        nextStatus === 'maintenance' ? 'locked for maintenance.' : 'restored to available.'
+      }`,
+    };
   };
 
   const adminProvisionStaff = async ({
@@ -2284,6 +2980,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   };
 
+
   const resolveSecurityAlert = (alertId: string) => {
     if (currentUser?.role !== 'admin') return;
     sound.playTap();
@@ -2327,7 +3024,10 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         activeSession,
         pendingUnlockToken,
         pendingSecondsLeft,
+        reservationTimeoutMessage,
+        clearReservationTimeout,
         sessionHistory,
+        walletTransactions,
         securityAlerts,
         adminStationActivity,
         hardwareKioskStationId,
@@ -2355,6 +3055,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         resendUnlockQrEmail,
         cancelPendingUnlock,
         verifyKioskUnlock,
+        unlockViaCoinWalkUp,
         unlockStationViaQr,
         endActiveSession,
         topUpWallet,

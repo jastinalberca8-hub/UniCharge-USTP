@@ -36,6 +36,22 @@ interface AdminPortalViewProps {
   onChangeSection: (section: AdminSection) => void;
 }
 
+function formatPaymentMethodLabel(method?: string): string {
+  switch (method) {
+    case 'cash':
+      return 'Kiosk Coin Slot';
+    case 'gcash':
+      return 'GCash';
+    case 'maya':
+      return 'Maya';
+    case 'gotyme':
+      return 'GoTyme Bank';
+    case 'wallet':
+    default:
+      return 'Campus E-Wallet';
+  }
+}
+
 export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
   section,
   onChangeSection,
@@ -59,6 +75,11 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
   const [provisionError, setProvisionError] = useState<string | null>(null);
   const [provisionSuccess, setProvisionSuccess] = useState<string | null>(null);
   const [roleFilter, setRoleFilter] = useState<'all' | 'student' | 'admin'>('all');
+  const [hardwareFeedback, setHardwareFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+  const [togglingSlotNumber, setTogglingSlotNumber] = useState<number | null>(null);
 
   const station = stations[0];
   const totalSlots = station?.totalSlots || TOTAL_COMPARTMENT_COUNT;
@@ -261,15 +282,20 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                       <td className="py-3 px-6">
                         <div className="font-semibold text-[#1E293B]">{tx.userName}</div>
                         <div className="text-[11px] font-mono text-[#64748B]">
-                          {tx.studentIdNumber} · {tx.id}
+                          {tx.studentIdNumber ? `${tx.studentIdNumber} · ${tx.id}` : tx.id}
                         </div>
                       </td>
                       <td className="py-3 px-4 font-mono font-semibold text-[#4E6E81]">
                         {formatCompartmentLabel(tx.slotNumber)}
                       </td>
                       <td className="py-3 px-4 text-[#1E293B]">{tx.pricingTier}</td>
-                      <td className="py-3 px-4 font-mono font-bold text-[#1E293B]">
-                        ₱{tx.totalFee.toFixed(2)}
+                      <td className="py-3 px-4 font-mono">
+                        <div className="font-bold text-[#1E293B]">₱{tx.totalFee.toFixed(2)}</div>
+                        {tx.paymentMethod && (
+                          <div className="text-[11px] font-sans text-[#64748B]">
+                            {formatPaymentMethodLabel(tx.paymentMethod)}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-6 text-right">
                         <span
@@ -312,9 +338,9 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
           </p>
         </div>
 
-        {/* Full-Width Physical 20-Compartment Simulator */}
+        {/* Full-Width Physical 20-Compartment Simulator (Admin Monitor Mode) */}
         <div className="rounded-2xl border border-[#E2E8F0] overflow-hidden bg-[#F8FAFC] shadow-sm">
-          <KioskHardwareSimulator />
+          <KioskHardwareSimulator adminMonitorOnly />
         </div>
 
         {/* Admin Compartment Override Controls */}
@@ -329,9 +355,36 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
               </p>
             </div>
             <span className="text-xs font-mono text-[#64748B]">
-              {availableSlots}/{totalSlots} Available · {inUseSlots} Busy
+              {availableSlots}/{totalSlots} Available · {inUseSlots} Busy · {maintenanceSlots} Maint
             </span>
           </div>
+
+          {hardwareFeedback && (
+            <div
+              role="status"
+              className={`p-3 rounded-xl border text-xs font-medium flex items-center justify-between gap-2 ${
+                hardwareFeedback.type === 'success'
+                  ? 'bg-[#EBF9F3] border-[#5BC496]/50 text-[#1E293B]'
+                  : 'bg-red-50 border-red-200 text-[#DC2626]'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {hardwareFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-[#5BC496] shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 text-[#DC2626] shrink-0" />
+                )}
+                <span>{hardwareFeedback.text}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHardwareFeedback(null)}
+                className="text-[11px] font-semibold underline cursor-pointer shrink-0"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {station.slots.map((slot) => {
@@ -381,7 +434,15 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
                     <button
-                      onClick={() => adminRemoteUnlockSlot(station.id, slot.slotNumber)}
+                      type="button"
+                      onClick={() => {
+                        setHardwareFeedback(null);
+                        adminRemoteUnlockSlot(station.id, slot.slotNumber);
+                        setHardwareFeedback({
+                          type: 'success',
+                          text: `${formatCompartmentLabel(slot.slotNumber)} force-unlocked & reset to Available.`,
+                        });
+                      }}
                       title="Force Unlock Compartment"
                       className="px-2.5 py-1.5 rounded-lg bg-[#4E6E81] text-white text-[11px] font-semibold hover:bg-[#3D5767] flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap"
                     >
@@ -389,16 +450,51 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                       <span>Force Unlock</span>
                     </button>
                     <button
-                      onClick={() => adminToggleSlotMaintenance(station.id, slot.slotNumber)}
-                      title="Toggle Maintenance"
-                      className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold flex items-center gap-1 cursor-pointer whitespace-nowrap ${
+                      type="button"
+                      disabled={togglingSlotNumber === slot.slotNumber}
+                      onClick={() => {
+                        void (async () => {
+                          setHardwareFeedback(null);
+                          setTogglingSlotNumber(slot.slotNumber);
+                          try {
+                            const res = await adminToggleSlotMaintenance(
+                              station.id,
+                              slot.slotNumber
+                            );
+                            if (res.message) {
+                              setHardwareFeedback({
+                                type: res.success ? 'success' : 'error',
+                                text: res.message,
+                              });
+                            }
+                          } finally {
+                            setTogglingSlotNumber(null);
+                          }
+                        })();
+                      }}
+                      title={
+                        slot.status === 'in_use'
+                          ? 'Force Unlock first before enabling Maintenance'
+                          : slot.status === 'maintenance'
+                          ? 'Restore compartment to Available'
+                          : 'Lock compartment for Maintenance'
+                      }
+                      className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold flex items-center gap-1 cursor-pointer whitespace-nowrap disabled:opacity-60 ${
                         slot.status === 'maintenance'
-                          ? 'bg-red-50 border-red-200 text-[#DC2626]'
+                          ? 'bg-red-50 border-red-200 text-[#DC2626] hover:bg-red-100'
+                          : slot.status === 'in_use'
+                          ? 'bg-[#F8FAFC] border-[#E2E8F0] text-[#94A3B8] hover:bg-amber-50'
                           : 'bg-[#FFFFFF] border-[#E2E8F0] text-[#64748B] hover:bg-[#EDF2F5]'
                       }`}
                     >
                       <Wrench className="w-3 h-3" />
-                      <span>{slot.status === 'maintenance' ? 'Restore' : 'Maint'}</span>
+                      <span>
+                        {togglingSlotNumber === slot.slotNumber
+                          ? 'Updating...'
+                          : slot.status === 'maintenance'
+                          ? 'Restore'
+                          : 'Maint'}
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -547,7 +643,7 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                       required
                       value={staffId}
                       onChange={(e) => setStaffId(e.target.value)}
-                      placeholder="ADMIN-02"
+                      placeholder="ADMIN-07"
                       className="w-full h-10 px-3 rounded-xl border border-[#E2E8F0] text-sm font-mono focus:outline-none focus:border-[#4E6E81]"
                     />
                   </div>
@@ -564,13 +660,13 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                   </div>
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-[#1E293B] mb-1">USTP Staff Email</label>
+                  <label className="block text-xs font-semibold text-[#1E293B] mb-1">USTP Staff Username / Email</label>
                   <input
-                    type="email"
+                    type="text"
                     required
                     value={staffEmail}
                     onChange={(e) => setStaffEmail(e.target.value)}
-                    placeholder="staff@ustp.edu.ph"
+                    placeholder="firstname.ustp.ph"
                     className="w-full h-10 px-3 rounded-xl border border-[#E2E8F0] text-sm focus:outline-none focus:border-[#4E6E81]"
                   />
                 </div>

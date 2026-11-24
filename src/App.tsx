@@ -8,7 +8,11 @@ import { FirestoreErrorBoundary } from './components/common/FirestoreErrorBounda
 const AppRouter: React.FC = () => {
   const { isAuthenticated, currentUser, currentRoute } = useUniCharge();
 
-  if (!isAuthenticated || !currentUser || currentRoute === '/login' || currentRoute === '/signup') {
+  if (!isAuthenticated || !currentUser) {
+    return <UnifiedAuthPage />;
+  }
+
+  if (currentRoute === '/login' || currentRoute === '/signup') {
     return <UnifiedAuthPage />;
   }
 

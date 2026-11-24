@@ -55,6 +55,8 @@ export interface KioskStation {
   powerDrawWatts: number;
 }
 
+export type PaymentMethod = 'wallet' | 'gcash' | 'maya' | 'gotyme' | 'cash';
+
 export interface PendingUnlockToken {
   tokenId: string;
   stationId: string;
@@ -65,7 +67,7 @@ export interface PendingUnlockToken {
   pricingTier: string;
   durationMinutes: number;
   totalFee: number;
-  paymentMethod: 'wallet' | 'gcash' | 'maya' | 'cash';
+  paymentMethod: PaymentMethod;
   qrPayload: string;
   pinCode: string;
   createdAt: number;
@@ -114,7 +116,7 @@ export interface UserAccount {
   biometricEnabled: boolean;
   pushNotifications: boolean;
   overchargeAlerts: boolean;
-  preferredPayment: 'wallet' | 'gcash' | 'maya';
+  preferredPayment: 'wallet' | 'gcash' | 'maya' | 'gotyme';
   emailVerified?: boolean;
   profileCompleted?: boolean;
   createdAt: string;
@@ -132,7 +134,37 @@ export interface SessionHistoryItem {
   totalFee: number;
   serviceType: ServiceType;
   pricingTier: string;
+  paymentMethod?: PaymentMethod | string;
   status: 'Completed' | 'Refunded';
+}
+
+export type WalletTransactionKind =
+  | 'reload'
+  | 'coin_change'
+  | 'ewallet_payment'
+  | 'coin_payment';
+
+export type WalletTransactionSource =
+  | 'wallet'
+  | 'gcash'
+  | 'maya'
+  | 'gotyme'
+  | 'cash'
+  | 'coin_change';
+
+export interface WalletTransaction {
+  id: string;
+  txId: string;
+  userUid: string;
+  kind: WalletTransactionKind;
+  paymentSource: WalletTransactionSource;
+  title: string;
+  referenceCode: string;
+  amount: number;
+  walletDelta: number;
+  balanceAfter: number;
+  date: string;
+  createdAtMs: number;
 }
 
 export interface SecurityAlert {
@@ -171,7 +203,7 @@ export interface DashboardNotification {
 export interface AdminStationTransaction {
   id: string;
   kind: 'reserved' | 'active' | 'completed';
-  userUid: string;
+  userUid: string | null;
   userName: string;
   studentIdNumber: string;
   slotNumber: number;

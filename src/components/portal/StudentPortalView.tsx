@@ -10,8 +10,8 @@ import {
   getTiersForService,
 } from '../../constants/pricing';
 import { sound } from '../../utils/audio';
-import { formatDuration } from '../../utils/format';
-import { LockerSlot, ServiceType, SessionHistoryItem } from '../../types';
+import { formatDuration, formatSessionTimer } from '../../utils/format';
+import { LockerSlot, PaymentMethod, ServiceType, SessionHistoryItem, WalletTransaction } from '../../types';
 import {
   Zap,
   BatteryCharging,
@@ -35,6 +35,9 @@ import {
   Mail,
   Loader2,
   X,
+  Smartphone,
+  Wallet,
+  BookOpen,
 } from 'lucide-react';
 import { KioskHardwareSimulator } from '../hardware/KioskHardwareSimulator';
 import { QrMatrixSvg } from '../hardware/QrMatrixSvg';
@@ -51,6 +54,71 @@ export type StudentSection =
 interface StudentPortalViewProps {
   section: StudentSection;
   onChangeSection: (section: StudentSection) => void;
+}
+
+type OnlineEpaymentPlatform = 'gcash' | 'maya' | 'gotyme';
+
+const EPAYMENT_PLATFORMS: Array<{
+  id: OnlineEpaymentPlatform;
+  name: string;
+  tagline: string;
+  accentHex: string;
+  badgeBg: string;
+  badgeText: string;
+  prefix: string;
+}> = [
+  {
+    id: 'gcash',
+    name: 'GCash',
+    tagline: 'Instant mobile wallet checkout',
+    accentHex: '#007DFE',
+    badgeBg: 'bg-blue-50 border-blue-200',
+    badgeText: 'text-[#007DFE]',
+    prefix: 'GCASH',
+  },
+  {
+    id: 'maya',
+    name: 'Maya',
+    tagline: 'Digital wallet & instant QR pay',
+    accentHex: '#00B463',
+    badgeBg: 'bg-emerald-50 border-emerald-200',
+    badgeText: 'text-[#059669]',
+    prefix: 'MAYA',
+  },
+  {
+    id: 'gotyme',
+    name: 'GoTyme Bank',
+    tagline: 'Zero-fee online bank transfer',
+    accentHex: '#0F766E',
+    badgeBg: 'bg-teal-50 border-teal-200',
+    badgeText: 'text-[#0F766E]',
+    prefix: 'GOTYME',
+  },
+];
+
+interface EpaymentCheckoutState {
+  platform: OnlineEpaymentPlatform;
+  mode: 'topup' | 'booking';
+  amount: number;
+  summaryLabel: string;
+}
+
+function formatPaymentMethodLabel(method?: string): string {
+  switch (method) {
+    case 'cash':
+      return 'Kiosk Coin Slot';
+    case 'coin_change':
+      return 'Coin Overpayment Change';
+    case 'gcash':
+      return 'GCash';
+    case 'maya':
+      return 'Maya';
+    case 'gotyme':
+      return 'GoTyme Bank';
+    case 'wallet':
+    default:
+      return 'Campus E-Wallet';
+  }
 }
 
 export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
@@ -70,7 +138,10 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
     activeSession,
     pendingUnlockToken,
     pendingSecondsLeft,
+    reservationTimeoutMessage,
+    clearReservationTimeout,
     sessionHistory,
+    walletTransactions,
     generateUnlockToken,
     regenerateUnlockToken,
     resendUnlockQrEmail,
@@ -88,7 +159,19 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
     markNotificationRead,
   } = useUniCharge();
 
-  const [paymentMethod, setPaymentMethod] = useState<'wallet' | 'gcash' | 'maya' | 'cash'>('wallet');
+  const [paymentMethod, setPaymentMethod] = useState<'wallet' | OnlineEpaymentPlatform>('wallet');
+  const [selectedTopUpPlatform, setSelectedTopUpPlatform] =
+    useState<OnlineEpaymentPlatform>('gcash');
+  const [customTopUpAmount, setCustomTopUpAmount] = useState<string>('150');
+  const [epaymentCheckout, setEpaymentCheckout] = useState<EpaymentCheckoutState | null>(null);
+  const [epayMobileNumber, setEpayMobileNumber] = useState<string>('09171234567');
+  const [epayMpin, setEpayMpin] = useState<string>('');
+  const [epayError, setEpayError] = useState<string | null>(null);
+  const [isProcessingEpay, setIsProcessingEpay] = useState(false);
+
+  const [isReloadingWallet, setIsReloadingWallet] = useState(false);
+  const [walletFeedback, setWalletFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [walletFilter, setWalletFilter] = useState<'all' | 'ewallet' | 'coin'>('all');
   const [bookingMessage, setBookingMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isGeneratingQr, setIsGeneratingQr] = useState(false);
   const [isResendingQrEmail, setIsResendingQrEmail] = useState(false);
@@ -147,12 +230,48 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
       ? selectedSlot
       : visibleCompartments.find((s) => s.status === 'available') || null;
 
+  const openEpaymentCheckout = (params: EpaymentCheckoutState) => {
+    sound.playTap();
+    setEpayError(null);
+    setEpayMpin('');
+    setEpaymentCheckout(params);
+  };
+
   const handleConfirmUnlock = async () => {
     if (isGeneratingQr) return;
+    if (activeSession) {
+      setBookingMessage({
+        type: 'error',
+        text: `You already have an active session in ${formatCompartmentLabel(
+          activeSession.slotNumber
+        )}. Retrieve your item and end your session before availing another locker.`,
+      });
+      return;
+    }
+
+    if (paymentMethod !== 'wallet') {
+      if (!activeCompartment) {
+        setBookingMessage({
+          type: 'error',
+          text: `No free ${selectedService} compartments available right now.`,
+        });
+        return;
+      }
+      openEpaymentCheckout({
+        platform: paymentMethod,
+        mode: 'booking',
+        amount: totalFee,
+        summaryLabel: `${effectiveTier.name} · ${formatCompartmentLabel(
+          activeCompartment.slotNumber
+        )}`,
+      });
+      return;
+    }
+
     setIsGeneratingQr(true);
     setResendStatusMessage(null);
     try {
-      const res = await generateUnlockToken(paymentMethod);
+      const res = await generateUnlockToken('wallet');
       if (res.success) {
         setBookingMessage({ type: 'success', text: res.message });
         setShowQrModal(true);
@@ -160,6 +279,84 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
         setBookingMessage({ type: 'error', text: res.message });
       }
     } finally {
+      setIsGeneratingQr(false);
+    }
+  };
+
+  const handleWalletReload = (amount: number, platform: OnlineEpaymentPlatform = selectedTopUpPlatform) => {
+    if (!Number.isFinite(amount) || amount < 10 || amount > 5000) {
+      setWalletFeedback({
+        type: 'error',
+        text: 'Please enter a reload amount between ₱10 and ₱5,000.',
+      });
+      return;
+    }
+    setWalletFeedback(null);
+    openEpaymentCheckout({
+      platform,
+      mode: 'topup',
+      amount,
+      summaryLabel: 'Campus E-Wallet Reload',
+    });
+  };
+
+  const handleCompleteEpaymentSimulation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!epaymentCheckout || isProcessingEpay) return;
+
+    const cleanMobile = epayMobileNumber.replace(/[\s-]/g, '');
+    if (!/^09\d{9}$/.test(cleanMobile)) {
+      setEpayError('Enter a valid 11-digit Philippine mobile number (e.g. 09171234567).');
+      return;
+    }
+    if (!/^\d{4}$/.test(epayMpin.trim())) {
+      setEpayError('Enter a 4-digit simulated MPIN (e.g. 1234) to authorize.');
+      return;
+    }
+
+    const platformMeta =
+      EPAYMENT_PLATFORMS.find((p) => p.id === epaymentCheckout.platform) ||
+      EPAYMENT_PLATFORMS[0];
+    const simulatedRef = `${platformMeta.prefix}-${Math.floor(100000 + Math.random() * 900000)}`;
+
+    setEpayError(null);
+    setIsProcessingEpay(true);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+
+      if (epaymentCheckout.mode === 'topup') {
+        setIsReloadingWallet(true);
+        const res = await topUpWallet(epaymentCheckout.amount, {
+          source: epaymentCheckout.platform,
+          referenceCode: simulatedRef,
+        });
+        setIsReloadingWallet(false);
+        if (res.success) {
+          sound.playChargingConnected();
+          setWalletFeedback({ type: 'success', text: res.message });
+          setEpaymentCheckout(null);
+        } else {
+          setEpayError(res.message);
+        }
+      } else {
+        setIsGeneratingQr(true);
+        setResendStatusMessage(null);
+        const res = await generateUnlockToken(epaymentCheckout.platform as PaymentMethod);
+        setIsGeneratingQr(false);
+        if (res.success) {
+          setBookingMessage({
+            type: 'success',
+            text: `${platformMeta.name} payment authorized (Ref ${simulatedRef}). ${res.message}`,
+          });
+          setEpaymentCheckout(null);
+          setShowQrModal(true);
+        } else {
+          setEpayError(res.message);
+        }
+      }
+    } finally {
+      setIsProcessingEpay(false);
+      setIsReloadingWallet(false);
       setIsGeneratingQr(false);
     }
   };
@@ -340,7 +537,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               </div>
               <span className="text-xs text-[#64748B] mt-2 block truncate">
                 {activeSession
-                  ? `${activeSession.pricingTier} · ${formatTimer(activeSession.remainingSeconds)} left`
+                  ? `${activeSession.pricingTier} · ${formatSessionTimer(activeSession.remainingSeconds)} left`
                   : 'Ready to avail a compartment'}
               </span>
             </div>
@@ -377,8 +574,18 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-base font-bold text-[#4E6E81]">Live Session Telemetry</h2>
                 {activeSession && (
-                  <span className="text-xs font-semibold text-[#1E293B] bg-[#EBF9F3] border border-[#5BC496]/40 px-2.5 py-0.5 rounded-md">
-                    {activeSession.serviceType === 'storage' ? 'Storage Active' : 'Charging Active'}
+                  <span
+                    className={`text-xs font-semibold px-2.5 py-0.5 rounded-md border ${
+                      activeSession.remainingSeconds === 0
+                        ? 'text-[#B45309] bg-amber-50 border-amber-300'
+                        : 'text-[#1E293B] bg-[#EBF9F3] border-[#5BC496]/40'
+                    }`}
+                  >
+                    {activeSession.remainingSeconds === 0
+                      ? 'Time Ended · Locked Safe'
+                      : activeSession.serviceType === 'storage'
+                      ? 'Storage Active'
+                      : 'Charging Active'}
                   </span>
                 )}
               </div>
@@ -388,23 +595,45 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   <div className="p-4 rounded-xl bg-[#4E6E81] text-white flex items-center justify-between">
                     <div>
                       <span className="text-xs text-slate-100/90 block">{activeSession.stationName}</span>
-                      <span className="text-2xl font-bold font-mono text-[#5BC496] mt-0.5 block">
-                        {formatTimer(activeSession.remainingSeconds)}
+                      <span
+                        className={`text-2xl font-bold font-mono mt-0.5 block ${
+                          activeSession.remainingSeconds === 0 ? 'text-amber-300' : 'text-[#5BC496]'
+                        }`}
+                      >
+                        {formatSessionTimer(activeSession.remainingSeconds)}
                       </span>
                       <span className="text-[11px] text-slate-100/80 font-mono">
-                        {formatCompartmentLabel(activeSession.slotNumber)} · {activeSession.pricingTier}
+                        {activeSession.remainingSeconds === 0
+                          ? `${formatCompartmentLabel(activeSession.slotNumber)} · Ready to Retrieve`
+                          : `${formatCompartmentLabel(activeSession.slotNumber)} · ${activeSession.pricingTier}`}
                       </span>
                     </div>
                     <div className="text-right">
-                      <span className="text-xs text-slate-100/90 block">Battery</span>
-                      <span className="text-2xl font-bold font-mono text-[#5BC496]">
-                        {activeSession.batteryCurrent}%
-                      </span>
-                      <span className="text-[11px] text-slate-100/80 font-mono">
-                        {activeSession.serviceType === 'storage'
-                          ? 'Solenoid Locked'
-                          : `${activeSession.chargingRateWatts}W USB-C PD`}
-                      </span>
+                      {activeSession.serviceType === 'storage' ? (
+                        <>
+                          <span className="text-xs text-slate-100/90 block">Locker Status</span>
+                          <span className="text-2xl font-bold font-mono text-[#5BC496] block">
+                            Secured
+                          </span>
+                          <span className="text-[11px] text-slate-100/80 font-mono block">
+                            {activeSession.remainingSeconds === 0
+                              ? 'Time Ended · Retrieve Anytime'
+                              : 'Solenoid Locked'}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-xs text-slate-100/90 block">Battery</span>
+                          <span className="text-2xl font-bold font-mono text-[#5BC496] block">
+                            {activeSession.batteryCurrent}%
+                          </span>
+                          <span className="text-[11px] text-slate-100/80 font-mono block">
+                            {activeSession.remainingSeconds === 0
+                              ? '0W Cut-Off (Locked Safe)'
+                              : `${activeSession.chargingRateWatts}W USB-C PD`}
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
 
@@ -424,19 +653,20 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     <button
+                      type="button"
                       onClick={() => onChangeSection('sessions')}
-                      className="flex-1 h-10 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#4E6E81] hover:bg-[#EDF2F5] cursor-pointer transition-colors"
+                      className="h-10 px-3.5 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#4E6E81] hover:bg-[#EDF2F5] cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors"
                     >
-                      Open Full Telemetry
+                      <span>Open Full Telemetry</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => void simulateFullCharge()}
-                      className="h-10 px-3 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/50 text-[11px] font-bold text-[#1E293B] hover:bg-[#5BC496]/20 cursor-pointer transition-colors"
+                      className="h-10 px-3.5 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/50 text-xs font-bold text-[#1E293B] hover:bg-[#5BC496]/20 cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors"
                     >
-                      Simulate 100%
+                      <span>Simulate 100%</span>
                     </button>
                     <button
                       type="button"
@@ -446,15 +676,16 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                           activeSession.slotNumber
                         )
                       }
-                      className="h-10 px-3 rounded-xl bg-red-50 border border-red-200 text-[11px] font-bold text-[#DC2626] hover:bg-red-100 cursor-pointer transition-colors"
+                      className="h-10 px-3.5 rounded-xl bg-red-50 border border-red-200 text-xs font-bold text-[#DC2626] hover:bg-red-100 cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors"
                     >
-                      Test Door Open
+                      <span>Test Door Open</span>
                     </button>
                     <button
+                      type="button"
                       onClick={() => setShowEndConfirm(true)}
-                      className="flex-1 h-10 rounded-xl bg-[#DC2626] text-white text-xs font-semibold hover:bg-red-700 cursor-pointer flex items-center justify-center gap-1.5 transition-colors"
+                      className="h-10 px-3.5 rounded-xl bg-[#DC2626] text-white text-xs font-semibold hover:bg-red-700 cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors"
                     >
-                      <Unlock className="w-3.5 h-3.5" />
+                      <Unlock className="w-3.5 h-3.5 shrink-0" />
                       <span>Unlock &amp; Retrieve</span>
                     </button>
                   </div>
@@ -619,6 +850,50 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
             </p>
           </div>
 
+          {activeSession && (
+            <div
+              role="alert"
+              className="p-4 rounded-2xl bg-amber-50 border border-amber-300 text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+            >
+              <div className="flex items-start gap-3">
+                <Lock className="w-5 h-5 text-[#F59E0B] shrink-0 mt-0.5" />
+                <div>
+                  <span className="text-xs font-bold block">
+                    One Active Compartment Limit · {formatCompartmentLabel(activeSession.slotNumber)} In Use
+                  </span>
+                  <span className="text-xs text-amber-900">
+                    Please retrieve your belongings and end your current session before availing another locker.
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => onChangeSection('sessions')}
+                  className="px-3 py-1.5 rounded-lg bg-[#4E6E81] text-white text-xs font-semibold hover:bg-[#3D5767] cursor-pointer whitespace-nowrap"
+                >
+                  Go to My Sessions
+                </button>
+              </div>
+            </div>
+          )}
+
+          {reservationTimeoutMessage && (
+            <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-xs font-medium flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-[#F59E0B] shrink-0" />
+                <span>{reservationTimeoutMessage}</span>
+              </div>
+              <button
+                type="button"
+                onClick={clearReservationTimeout}
+                className="text-[11px] font-bold underline cursor-pointer shrink-0"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
           {pendingUnlockToken && (
             <div className="p-4 rounded-2xl bg-[#EBF9F3] border border-[#5BC496] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-start gap-3">
@@ -776,7 +1051,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                 <div className="grid grid-cols-5 gap-2">
                   {visibleCompartments.map((slot) => {
                     const isSel = activeCompartment?.slotNumber === slot.slotNumber;
-                    const isFree = slot.status === 'available';
+                    const isFree = slot.status === 'available' && !activeSession;
                     return (
                       <button
                         key={slot.id}
@@ -796,7 +1071,13 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                       >
                         <div>{slot.category === 'charging' ? `#${slot.code}` : slot.code}</div>
                         <div className="text-[10px] mt-0.5">
-                          {isSel ? 'Selected' : isFree ? 'Free' : slot.status === 'in_use' ? 'Busy' : 'Maint'}
+                          {isSel
+                            ? 'Selected'
+                            : slot.status === 'available'
+                            ? 'Free'
+                            : slot.status === 'in_use'
+                            ? 'Busy'
+                            : 'Maint'}
                         </div>
                       </button>
                     );
@@ -805,9 +1086,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               </div>
             </div>
 
-            {/* Summary & Payment Column */}
+            {/* Summary & Online E-Payment Column */}
             <div className="lg:col-span-5 bg-[#FFFFFF] p-6 rounded-2xl border border-[#E2E8F0] space-y-4">
-              <h3 className="text-base font-bold text-[#4E6E81]">Payment &amp; Solenoid Release</h3>
+              <h3 className="text-base font-bold text-[#4E6E81]">Online E-Payment &amp; Solenoid Release</h3>
               <div className="space-y-2 text-xs border-b border-[#E2E8F0] pb-4">
                 <div className="flex justify-between">
                   <span className="text-[#64748B]">Station</span>
@@ -838,31 +1119,59 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               </div>
 
               <div className="space-y-2">
-                <label className="block text-xs font-semibold text-[#1E293B]">Payment Method</label>
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-[#1E293B]">
+                    Online E-Payment Method
+                  </label>
+                  <span className="text-[10px] font-medium text-[#64748B]">
+                    Coins: Walk-In Kiosk Only
+                  </span>
+                </div>
                 {(
                   [
-                    { id: 'wallet', label: `Campus E-Wallet (₱${student.walletBalance.toFixed(2)})` },
-                    { id: 'gcash', label: 'GCash Digital Wallet' },
-                    { id: 'maya', label: 'Maya Wallet' },
-                    { id: 'cash', label: 'Kiosk Coin / Cash Slot' },
-                  ] as const
+                    {
+                      id: 'wallet' as const,
+                      label: `Campus E-Wallet (₱${student.walletBalance.toFixed(2)})`,
+                      subtitle: 'Instant 1-scan wallet payment with zero surcharge',
+                    },
+                    {
+                      id: 'gcash' as const,
+                      label: 'GCash',
+                      subtitle: `Simulated GCash checkout · instant QR pass (₱${totalFee}.00)`,
+                    },
+                    {
+                      id: 'maya' as const,
+                      label: 'Maya',
+                      subtitle: `Simulated Maya digital wallet checkout (₱${totalFee}.00)`,
+                    },
+                    {
+                      id: 'gotyme' as const,
+                      label: 'GoTyme Bank',
+                      subtitle: `Simulated GoTyme online transfer checkout (₱${totalFee}.00)`,
+                    },
+                  ]
                 ).map((pm) => (
                   <button
                     key={pm.id}
                     type="button"
+                    disabled={Boolean(activeSession)}
                     onClick={() => {
                       sound.playTap();
                       setPaymentMethod(pm.id);
+                      setBookingMessage(null);
                     }}
-                    className={`w-full p-2.5 rounded-xl border text-left text-xs font-medium flex items-center justify-between cursor-pointer ${
+                    className={`w-full p-2.5 rounded-xl border text-left text-xs flex items-center justify-between gap-3 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
                       paymentMethod === pm.id
-                        ? 'bg-[#EDF2F5] border-[#4E6E81] text-[#4E6E81] font-semibold'
+                        ? 'bg-[#EDF2F5] border-[#4E6E81] text-[#4E6E81]'
                         : 'bg-[#FFFFFF] border-[#E2E8F0] text-[#1E293B] hover:bg-[#F8FAFC]'
                     }`}
                   >
-                    <span>{pm.label}</span>
+                    <div>
+                      <span className="font-semibold block">{pm.label}</span>
+                      <span className="text-[11px] text-[#64748B] block mt-0.5">{pm.subtitle}</span>
+                    </div>
                     <span
-                      className={`w-3.5 h-3.5 rounded-full border ${
+                      className={`w-3.5 h-3.5 rounded-full border shrink-0 ${
                         paymentMethod === pm.id ? 'bg-[#5BC496] border-[#4E6E81]' : 'border-[#E2E8F0]'
                       }`}
                     />
@@ -873,8 +1182,8 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               <button
                 type="button"
                 onClick={() => void handleConfirmUnlock()}
-                disabled={isGeneratingQr || !activeCompartment}
-                className="w-full h-11 rounded-xl bg-[#4E6E81] text-white font-semibold text-xs flex items-center justify-center gap-2 hover:bg-[#3D5767] disabled:opacity-60 cursor-pointer shadow-sm transition-colors"
+                disabled={Boolean(activeSession) || isGeneratingQr || !activeCompartment}
+                className="w-full h-11 rounded-xl bg-[#4E6E81] text-white font-semibold text-xs flex items-center justify-center gap-2 hover:bg-[#3D5767] disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer shadow-sm transition-colors"
               >
                 {isGeneratingQr ? (
                   <Loader2 className="w-4 h-4 text-[#5BC496] animate-spin" />
@@ -882,9 +1191,13 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   <QrCode className="w-4 h-4 text-[#5BC496]" />
                 )}
                 <span>
-                  {isGeneratingQr
+                  {activeSession
+                    ? 'End Active Session First'
+                    : isGeneratingQr
                     ? 'Generating & Emailing QR Pass...'
-                    : `Authorize & Generate Unlock QR (₱${totalFee})`}
+                    : paymentMethod === 'wallet'
+                    ? `Authorize & Generate Unlock QR (₱${totalFee})`
+                    : `Pay via ${formatPaymentMethodLabel(paymentMethod)} (₱${totalFee})`}
                 </span>
               </button>
               <p className="text-[11px] text-[#64748B] text-center leading-relaxed">
@@ -910,8 +1223,19 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-5 border-b border-[#E2E8F0]">
                 <div>
                   <div className="flex items-center gap-2 text-xs font-semibold text-[#1E293B] mb-1">
-                    <span className="w-2 h-2 rounded-full bg-[#5BC496] animate-pulse" />
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        activeSession.remainingSeconds === 0
+                          ? 'bg-[#F59E0B]'
+                          : 'bg-[#5BC496] animate-pulse'
+                      }`}
+                    />
                     <span>Session {activeSession.sessionId}</span>
+                    {activeSession.remainingSeconds === 0 && (
+                      <span className="px-2 py-0.5 rounded-md bg-amber-50 border border-amber-300 text-[#B45309] text-[10px] font-bold">
+                        Time Ended · Locked Safe
+                      </span>
+                    )}
                   </div>
                   <h2 className="text-lg font-bold text-[#4E6E81]">
                     {activeSession.stationName} — {formatCompartmentLabel(activeSession.slotNumber)}
@@ -934,22 +1258,49 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   <span className="text-xs text-slate-100 flex items-center gap-1.5">
                     <Clock className="w-3.5 h-3.5 text-[#5BC496]" /> Time Remaining
                   </span>
-                  <span className="text-3xl font-bold font-mono text-[#5BC496] mt-1 block">
-                    {formatTimer(activeSession.remainingSeconds)}
+                  <span
+                    className={`text-3xl font-bold font-mono mt-1 block ${
+                      activeSession.remainingSeconds === 0 ? 'text-amber-300' : 'text-[#5BC496]'
+                    }`}
+                  >
+                    {formatSessionTimer(activeSession.remainingSeconds)}
                   </span>
+                  {activeSession.remainingSeconds === 0 && (
+                    <span className="text-[11px] text-amber-200 font-mono block mt-0.5">
+                      Locked Safe — Power Cut-Off Active · Retrieve Anytime
+                    </span>
+                  )}
                 </div>
                 <div className="p-4 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
-                  <span className="text-xs text-[#64748B] flex items-center gap-1.5">
-                    <BatteryCharging className="w-3.5 h-3.5 text-[#5BC496]" /> Device Charge
-                  </span>
-                  <span className="text-3xl font-bold font-mono text-[#1E293B] mt-1 block">
-                    {activeSession.batteryCurrent}%
-                  </span>
-                  <span className="text-xs text-[#64748B] font-mono">
-                    {activeSession.serviceType === 'storage'
-                      ? 'Secure storage locked'
-                      : `${activeSession.chargingRateWatts}W PD active`}
-                  </span>
+                  {activeSession.serviceType === 'storage' ? (
+                    <>
+                      <span className="text-xs text-[#64748B] flex items-center gap-1.5">
+                        <Lock className="w-3.5 h-3.5 text-[#5BC496]" /> Locker Status
+                      </span>
+                      <span className="text-3xl font-bold font-mono text-[#1E293B] mt-1 block">
+                        Secured
+                      </span>
+                      <span className="text-xs text-[#64748B] font-mono block">
+                        {activeSession.remainingSeconds === 0
+                          ? 'Time Ended · Solenoid Locked Safe'
+                          : 'Solenoid Locked'}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-xs text-[#64748B] flex items-center gap-1.5">
+                        <BatteryCharging className="w-3.5 h-3.5 text-[#5BC496]" /> Device Charge
+                      </span>
+                      <span className="text-3xl font-bold font-mono text-[#1E293B] mt-1 block">
+                        {activeSession.batteryCurrent}%
+                      </span>
+                      <span className="text-xs text-[#64748B] font-mono block">
+                        {activeSession.remainingSeconds === 0
+                          ? '0W Overcharge Auto Cut-Off Active'
+                          : `${activeSession.chargingRateWatts}W PD active`}
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -1063,6 +1414,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   <div className="flex justify-between"><span className="text-[#64748B]">Compartment</span><span className="font-mono text-[#1E293B]">{formatCompartmentLabel(selectedReceipt.slotNumber)}</span></div>
                   <div className="flex justify-between"><span className="text-[#64748B]">Duration</span><span className="font-mono text-[#1E293B]">{formatDuration(selectedReceipt.durationMinutes)}</span></div>
                   <div className="flex justify-between"><span className="text-[#64748B]">Date</span><span className="font-mono text-[#1E293B]">{selectedReceipt.date}</span></div>
+                  <div className="flex justify-between"><span className="text-[#64748B]">Payment</span><span className="font-semibold text-[#1E293B]">{formatPaymentMethodLabel(selectedReceipt.paymentMethod)}</span></div>
                   <div className="flex justify-between"><span className="text-[#64748B]">Amount Paid</span><span className="font-mono font-bold text-[#4E6E81]">₱{selectedReceipt.totalFee}.00</span></div>
                 </div>
                 <button
@@ -1112,54 +1464,251 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
 
     // 4. WALLET & COINS
     if (section === 'wallet') {
+      const filteredWalletTx = walletTransactions.filter((tx: WalletTransaction) => {
+        if (walletFilter === 'ewallet') {
+          return (
+            tx.kind === 'reload' ||
+            tx.kind === 'ewallet_payment' ||
+            tx.paymentSource === 'wallet' ||
+            tx.paymentSource === 'gcash' ||
+            tx.paymentSource === 'maya' ||
+            tx.paymentSource === 'gotyme'
+          );
+        }
+        if (walletFilter === 'coin') {
+          return (
+            tx.kind === 'coin_payment' ||
+            tx.kind === 'coin_change' ||
+            tx.paymentSource === 'cash' ||
+            tx.paymentSource === 'coin_change'
+          );
+        }
+        return true;
+      });
+
+      const activePlatformMeta =
+        EPAYMENT_PLATFORMS.find((p) => p.id === selectedTopUpPlatform) || EPAYMENT_PLATFORMS[0];
+
       return (
         <div className="max-w-3xl space-y-6">
           <div>
             <h1 className="text-2xl font-bold text-[#4E6E81] tracking-tight">Wallet &amp; Coins</h1>
-            <p className="text-sm text-[#64748B]">Manage your USTP Campus E-Wallet credits for instant 1-scan locker unlocks.</p>
+            <p className="text-sm text-[#64748B]">
+              Reload your USTP Campus E-Wallet via GCash, Maya, or GoTyme Bank and track wallet &amp; kiosk coin activity.
+            </p>
           </div>
 
-          <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div>
-              <span className="text-xs font-semibold text-[#64748B] uppercase tracking-wider">Available Balance</span>
-              <div className="text-4xl font-bold font-mono text-[#1E293B] mt-1">
-                ₱{student.walletBalance.toFixed(2)}
+          <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#E2E8F0] pb-5">
+              <div>
+                <span className="text-xs font-semibold text-[#64748B] uppercase tracking-wider">
+                  Available Balance
+                </span>
+                <div className="text-4xl font-bold font-mono text-[#1E293B] mt-1">
+                  ₱{student.walletBalance.toFixed(2)}
+                </div>
+                <p className="text-xs text-[#64748B] mt-1">
+                  Zero transaction surcharge at {station.name}. Extra kiosk coins auto-credit here.
+                </p>
               </div>
-              <p className="text-xs text-[#64748B] mt-1">Zero transaction surcharge at {station.name}.</p>
+              <div className="flex flex-wrap gap-2">
+                {[20, 50, 100, 200].map((amt) => (
+                  <button
+                    key={amt}
+                    type="button"
+                    disabled={isReloadingWallet}
+                    onClick={() => handleWalletReload(amt)}
+                    className="px-3.5 py-2.5 rounded-xl bg-[#5BC496] text-[#1E293B] text-xs font-bold font-mono hover:bg-[#48AD80] disabled:opacity-60 flex items-center gap-1 cursor-pointer shadow-sm transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-[#1E293B]" />
+                    <span>₱{amt}</span>
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="flex flex-wrap gap-2">
-              {[100, 200, 500].map((amt) => (
+
+            {/* Online E-Payment Platform Selector & Custom Reload Simulation */}
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-bold text-[#1E293B] uppercase tracking-wider">
+                  Simulate Online E-Payment Reload
+                </span>
+                <span className="text-[11px] text-[#64748B]">
+                  Step 1: Pick platform · Step 2: Tap preset or custom ₱ amount
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                {EPAYMENT_PLATFORMS.map((plat) => {
+                  const isSel = selectedTopUpPlatform === plat.id;
+                  return (
+                    <button
+                      key={plat.id}
+                      type="button"
+                      onClick={() => {
+                        sound.playTap();
+                        setSelectedTopUpPlatform(plat.id);
+                      }}
+                      className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                        isSel
+                          ? 'bg-[#EDF2F5] border-[#4E6E81] ring-1 ring-[#4E6E81]/30'
+                          : 'bg-[#F8FAFC] border-[#E2E8F0] hover:bg-[#EDF2F5]/60'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-[#1E293B]">{plat.name}</span>
+                        <span
+                          className="w-2.5 h-2.5 rounded-full shrink-0"
+                          style={{ backgroundColor: plat.accentHex }}
+                        />
+                      </div>
+                      <span className="text-[11px] text-[#64748B] block mt-0.5">
+                        {plat.tagline}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2.5 pt-1">
+                <div className="relative flex-1">
+                  <span className="absolute left-3.5 top-2.5 text-sm font-mono font-bold text-[#64748B]">
+                    ₱
+                  </span>
+                  <input
+                    type="number"
+                    min={10}
+                    max={5000}
+                    step={5}
+                    value={customTopUpAmount}
+                    onChange={(e) => setCustomTopUpAmount(e.target.value)}
+                    placeholder="150"
+                    className="w-full h-10 pl-8 pr-3 rounded-xl border border-[#E2E8F0] text-sm font-mono font-semibold text-[#1E293B] focus:outline-none focus:border-[#4E6E81]"
+                  />
+                </div>
                 <button
-                  key={amt}
-                  onClick={() => topUpWallet(amt)}
-                  className="px-4 py-2.5 rounded-xl bg-[#5BC496] text-[#1E293B] text-xs font-bold font-mono hover:bg-[#48AD80] flex items-center gap-1 cursor-pointer shadow-sm transition-colors"
+                  type="button"
+                  disabled={isReloadingWallet}
+                  onClick={() => handleWalletReload(Number(customTopUpAmount))}
+                  className="h-10 px-4 rounded-xl bg-[#4E6E81] hover:bg-[#3D5767] text-white text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-60"
                 >
-                  <Plus className="w-3.5 h-3.5 text-[#1E293B]" />
-                  <span>Reload ₱{amt}</span>
+                  <Smartphone className="w-4 h-4 text-[#5BC496]" />
+                  <span>Top Up via {activePlatformMeta.name}</span>
                 </button>
-              ))}
+              </div>
+            </div>
+
+            {walletFeedback && (
+              <div
+                className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
+                  walletFeedback.type === 'success'
+                    ? 'bg-[#EBF9F3] border-[#5BC496]/50 text-[#15803D]'
+                    : 'bg-red-50 border-red-200 text-[#DC2626]'
+                }`}
+              >
+                {walletFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                )}
+                <span>{walletFeedback.text}</span>
+              </div>
+            )}
+          </div>
+
+          {/* How Online E-Payments & Coins Work */}
+          <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-5 space-y-3">
+            <div className="flex items-center gap-2 text-xs font-bold text-[#4E6E81] uppercase tracking-wider">
+              <Wallet className="w-4 h-4 text-[#5BC496]" />
+              <span>How Online E-Payments &amp; Walk-In Coins Work</span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs text-[#64748B]">
+              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
+                <span className="font-bold text-[#1E293B] block mb-1">1. Campus E-Wallet</span>
+                Reload credits using GCash, Maya, or GoTyme Bank for 1-tap locker unlocks with zero surcharges.
+              </div>
+              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
+                <span className="font-bold text-[#1E293B] block mb-1">2. Direct E-Payment</span>
+                Pay per locker booking directly with GCash, Maya, or GoTyme Bank inside Avail a Locker.
+              </div>
+              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
+                <span className="font-bold text-[#1E293B] block mb-1">3. Walk-In Coins</span>
+                Physical coins (₱1/₱5/₱10/₱20) work directly at the kiosk touchscreen with no account needed.
+              </div>
             </div>
           </div>
 
-          <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 space-y-3">
-            <h3 className="text-sm font-bold text-[#4E6E81]">Recent Wallet Activity</h3>
-            {sessionHistory.length === 0 ? (
+          <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-bold text-[#4E6E81]">Recent Wallet &amp; Coin Activity</h3>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {(
+                  [
+                    { id: 'all', label: 'All' },
+                    { id: 'ewallet', label: 'E-wallet' },
+                    { id: 'coin', label: 'Coin' },
+                  ] as const
+                ).map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setWalletFilter(tab.id)}
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold cursor-pointer ${
+                      walletFilter === tab.id
+                        ? 'bg-[#4E6E81] border-[#4E6E81] text-white'
+                        : 'bg-[#FFFFFF] border-[#E2E8F0] text-[#64748B] hover:bg-[#F8FAFC]'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {filteredWalletTx.length === 0 ? (
               <p className="py-6 text-center text-xs text-[#64748B]">
-                No transactions yet. Reload your wallet above or avail a locker to get started.
+                No transactions match this filter yet. Reload your wallet above or avail a locker to get started.
               </p>
             ) : (
               <div className="divide-y divide-[#E2E8F0] text-xs">
-                {sessionHistory.map((h) => (
-                  <div key={h.id} className="py-3 flex items-center justify-between">
-                    <div>
-                      <span className="font-semibold text-[#1E293B] block">
-                        {h.pricingTier} ({formatCompartmentLabel(h.slotNumber)})
-                      </span>
-                      <span className="text-[#64748B]">{h.date} · {h.receiptNumber}</span>
+                {filteredWalletTx.map((tx: WalletTransaction) => {
+                  const isCredit = tx.walletDelta > 0;
+                  const isDebit = tx.walletDelta < 0;
+                  const signedText = isCredit
+                    ? `+₱${tx.walletDelta.toFixed(2)}`
+                    : isDebit
+                    ? `-₱${Math.abs(tx.walletDelta).toFixed(2)}`
+                    : `₱${tx.amount.toFixed(2)} Paid`;
+
+                  return (
+                    <div key={tx.id} className="py-3 flex items-center justify-between gap-4">
+                      <div className="min-w-0">
+                        <span className="font-semibold text-[#1E293B] block truncate">
+                          {tx.title}
+                        </span>
+                        <span className="text-[#64748B] font-mono text-[11px] block mt-0.5 truncate">
+                          {tx.date} · {tx.referenceCode} · {formatPaymentMethodLabel(tx.paymentSource)}
+                        </span>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <span
+                          className={`font-mono font-bold block ${
+                            isCredit
+                              ? 'text-[#15803D]'
+                              : isDebit
+                              ? 'text-[#1E293B]'
+                              : 'text-[#4E6E81]'
+                          }`}
+                        >
+                          {signedText}
+                        </span>
+                        <span className="text-[11px] font-mono text-[#64748B] block mt-0.5">
+                          Bal: ₱{tx.balanceAfter.toFixed(2)}
+                        </span>
+                      </div>
                     </div>
-                    <span className="font-mono font-bold text-[#1E293B]">-₱{h.totalFee.toFixed(2)}</span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1236,17 +1785,18 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
 
         {section === 'settings' ? (
           <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] divide-y divide-[#E2E8F0]">
-            <div className="p-5 flex items-center justify-between">
+            <div className="p-5 flex items-center justify-between gap-4">
               <div className="flex items-center gap-3">
-                <Fingerprint className="w-5 h-5 text-[#4E6E81]" />
+                <Fingerprint className="w-5 h-5 text-[#4E6E81] shrink-0" />
                 <div>
                   <span className="text-sm font-semibold text-[#1E293B] block">Biometric Locker Retrieval</span>
                   <span className="text-xs text-[#64748B]">Allow Face ID / Fingerprint verification when unlocking</span>
                 </div>
               </div>
               <button
+                type="button"
                 onClick={toggleBiometrics}
-                className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${
+                className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer shrink-0 ${
                   student.biometricEnabled ? 'bg-[#5BC496]' : 'bg-gray-300'
                 }`}
               >
@@ -1258,17 +1808,18 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               </button>
             </div>
 
-            <div className="p-5 flex items-center justify-between">
+            <div className="p-5 flex items-center justify-between gap-4">
               <div className="flex items-center gap-3">
-                <Bell className="w-5 h-5 text-[#4E6E81]" />
+                <Bell className="w-5 h-5 text-[#4E6E81] shrink-0" />
                 <div>
                   <span className="text-sm font-semibold text-[#1E293B] block">Charging Completion Alerts</span>
                   <span className="text-xs text-[#64748B]">Notify at 80% and 100% battery capacity</span>
                 </div>
               </div>
               <button
+                type="button"
                 onClick={togglePushNotifications}
-                className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${
+                className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer shrink-0 ${
                   student.pushNotifications ? 'bg-[#5BC496]' : 'bg-gray-300'
                 }`}
               >
@@ -1279,20 +1830,63 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                 />
               </button>
             </div>
+
+            <div className="p-5 flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <ShieldCheck className="w-5 h-5 text-[#4E6E81] shrink-0" />
+                <div>
+                  <span className="text-sm font-semibold text-[#1E293B] block">Overcharge Auto Cut-Off Alerts</span>
+                  <span className="text-xs text-[#64748B]">Automatically cut USB-C PD output at 100% battery and notify</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={toggleOverchargeProtection}
+                className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer shrink-0 ${
+                  student.overchargeAlerts ? 'bg-[#5BC496]' : 'bg-gray-300'
+                }`}
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${
+                    student.overchargeAlerts ? 'translate-x-5.5' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
           </div>
         ) : (
-          <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 space-y-4">
-            <div className="flex items-center gap-2 text-sm font-bold text-[#4E6E81]">
-              <PhoneCall className="w-4 h-4 text-[#5BC496]" />
-              <span>UniCharge Station Hardware &amp; Security Desk</span>
+          <div className="space-y-4">
+            <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 space-y-3">
+              <div className="flex items-center gap-2 text-sm font-bold text-[#4E6E81]">
+                <BookOpen className="w-4 h-4 text-[#5BC496]" />
+                <span>Quick User Guide &amp; Troubleshooting</span>
+              </div>
+              <div className="space-y-2 text-xs text-[#64748B] leading-relaxed">
+                <p>
+                  <strong className="text-[#1E293B]">Online Booking:</strong> Choose a compartment &amp; tier in Avail a Locker, pay via Campus E-Wallet, GCash, Maya, or GoTyme Bank, then scan the QR or enter the 6-digit PIN at the station within 5 minutes.
+                </p>
+                <p>
+                  <strong className="text-[#1E293B]">Dead-Phone Walk-In:</strong> Tap Walk-Up Coin directly on the kiosk screen, pick a free compartment, choose your own 6-digit PIN, and insert coins—no phone or login required.
+                </p>
+                <p>
+                  <strong className="text-[#1E293B]">1 Locker Limit:</strong> Retrieve your device and end your active session before availing a new compartment.
+                </p>
+              </div>
             </div>
-            <p className="text-xs text-[#64748B] leading-relaxed">
-              If a locker solenoid latch does not release or you left personal items inside after session expiration, contact campus ICT support immediately with your receipt number.
-            </p>
-            <div className="p-4 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-xs space-y-1 font-mono text-[#1E293B]">
-              <div>Hotline: (088) 856-1738 loc. 204</div>
-              <div>Station: {station.name} ({station.campusCode})</div>
-              <div>Support Email: unicharge.ustp@gmail.com</div>
+
+            <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 space-y-4">
+              <div className="flex items-center gap-2 text-sm font-bold text-[#4E6E81]">
+                <PhoneCall className="w-4 h-4 text-[#5BC496]" />
+                <span>UniCharge Station Hardware &amp; Security Desk</span>
+              </div>
+              <p className="text-xs text-[#64748B] leading-relaxed">
+                If a locker solenoid latch does not release or you left personal items inside after session expiration, contact campus ICT support immediately with your receipt number.
+              </p>
+              <div className="p-4 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-xs space-y-1 font-mono text-[#1E293B]">
+                <div>Hotline: (088) 856-1738 loc. 204</div>
+                <div>Station: {station.name} ({station.campusCode})</div>
+                <div>Support Email: unicharge.ustp@gmail.com</div>
+              </div>
             </div>
           </div>
         )}
@@ -1330,6 +1924,11 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               Walk up to the <strong>{pendingUnlockToken.stationName}</strong>, tap{' '}
               <strong>&lsquo;Scan QR&rsquo;</strong> on the touchscreen, and hold this QR code (or the PNG from your email) to the kiosk camera to release{' '}
               <strong>{formatCompartmentLabel(pendingUnlockToken.slotNumber)}</strong> ({pendingUnlockToken.pricingTier}).
+              {pendingUnlockToken.paymentMethod === 'cash' && (
+                <span className="block mt-1 font-semibold text-[#4E6E81]">
+                  Coin Slot Payment: Insert ₱{pendingUnlockToken.totalFee.toFixed(2)} in coins when prompted after scanning.
+                </span>
+              )}
             </div>
 
             {pendingUnlockToken.emailSent ? (
@@ -1477,6 +2076,160 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* SIMULATED ONLINE E-PAYMENT GATEWAY MODAL (GCash / Maya / GoTyme Bank) */}
+      {epaymentCheckout && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-start sm:items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          {(() => {
+            const plat =
+              EPAYMENT_PLATFORMS.find((p) => p.id === epaymentCheckout.platform) ||
+              EPAYMENT_PLATFORMS[0];
+            return (
+              <div
+                className="w-full max-w-sm my-auto max-h-[calc(100dvh-1.5rem)] overflow-y-auto bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] border-t-4 shadow-2xl p-5 space-y-4"
+                style={{ borderTopColor: plat.accentHex }}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <span
+                      className={`inline-block px-2 py-0.5 rounded-md border text-[10px] font-bold uppercase ${plat.badgeBg} ${plat.badgeText}`}
+                    >
+                      Simulated {plat.name} Checkout
+                    </span>
+                    <h3 className="text-base font-bold text-[#1E293B] mt-1.5">
+                      Authorize ₱{epaymentCheckout.amount.toFixed(2)} Payment
+                    </h3>
+                    <p className="text-xs text-[#64748B] mt-0.5">
+                      {epaymentCheckout.summaryLabel} · UniCharge USTP
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => !isProcessingEpay && setEpaymentCheckout(null)}
+                    aria-label="Close e-payment modal"
+                    className="w-8 h-8 rounded-lg flex items-center justify-center text-[#64748B] hover:bg-[#EDF2F5] cursor-pointer shrink-0"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-xs space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-[#64748B]">Platform</span>
+                    <span className="font-bold text-[#1E293B]">{plat.name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#64748B]">Merchant</span>
+                    <span className="font-semibold text-[#1E293B]">UniCharge USTP CDO</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#64748B]">Amount Due</span>
+                    <span className="font-mono font-bold text-[#4E6E81]">
+                      ₱{epaymentCheckout.amount.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+
+                {epayError && (
+                  <div
+                    role="alert"
+                    className="p-2.5 rounded-xl bg-red-50 border border-red-200 text-xs text-[#DC2626] font-medium flex items-center gap-2"
+                  >
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{epayError}</span>
+                  </div>
+                )}
+
+                <form onSubmit={(e) => void handleCompleteEpaymentSimulation(e)} className="space-y-3">
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-xs font-semibold text-[#1E293B]">
+                        {plat.name} Mobile Number
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setEpayMobileNumber('09171234567')}
+                        className="text-[11px] font-semibold text-[#4E6E81] hover:underline cursor-pointer"
+                      >
+                        Use Demo Number
+                      </button>
+                    </div>
+                    <input
+                      type="tel"
+                      value={epayMobileNumber}
+                      onChange={(e) =>
+                        setEpayMobileNumber(e.target.value.replace(/\D/g, '').slice(0, 11))
+                      }
+                      placeholder="09171234567"
+                      required
+                      className="w-full h-10 px-3 rounded-xl border border-[#E2E8F0] text-sm font-mono text-[#1E293B] focus:outline-none focus:border-[#4E6E81]"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-xs font-semibold text-[#1E293B]">
+                        4-Digit Demo MPIN
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setEpayMpin('1234')}
+                        className="text-[11px] font-semibold text-[#4E6E81] hover:underline cursor-pointer"
+                      >
+                        Auto-Fill Demo PIN (1234)
+                      </button>
+                    </div>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      maxLength={4}
+                      value={epayMpin}
+                      onChange={(e) =>
+                        setEpayMpin(e.target.value.replace(/\D/g, '').slice(0, 4))
+                      }
+                      placeholder="••••"
+                      required
+                      autoFocus
+                      className="w-full h-10 px-3 rounded-xl border border-[#E2E8F0] text-base font-mono tracking-[0.4em] text-center text-[#1E293B] focus:outline-none focus:border-[#4E6E81]"
+                    />
+                    <span className="text-[10px] text-[#64748B] block mt-1">
+                      Demo simulation only — no real funds are debited.
+                    </span>
+                  </div>
+
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="button"
+                      disabled={isProcessingEpay}
+                      onClick={() => setEpaymentCheckout(null)}
+                      className="flex-1 h-10 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#64748B] hover:bg-[#F8FAFC] cursor-pointer disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isProcessingEpay}
+                      className="flex-1 h-10 rounded-xl text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60 shadow-sm"
+                      style={{ backgroundColor: plat.accentHex }}
+                    >
+                      {isProcessingEpay ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <CheckCircle2 className="w-4 h-4" />
+                      )}
+                      <span>
+                        {isProcessingEpay
+                          ? 'Authorizing...'
+                          : `Pay ₱${epaymentCheckout.amount.toFixed(2)}`}
+                      </span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+            );
+          })()}
         </div>
       )}
     </>

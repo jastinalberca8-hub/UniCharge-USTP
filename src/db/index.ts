@@ -28,8 +28,11 @@ export const createPool = () => {
         connectionString,
         ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
         max: maxConnections,
-        idleTimeoutMillis: 10000,
-        connectionTimeoutMillis: 15000,
+        idleTimeoutMillis: 5000,
+        connectionTimeoutMillis: 20000,
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 5000,
+        allowExitOnIdle: true,
       });
     } else {
       const isLocalHost = sqlHost === 'localhost' || sqlHost === '127.0.0.1';
@@ -45,13 +48,30 @@ export const createPool = () => {
         password: process.env.SQL_PASSWORD,
         database: process.env.SQL_DB_NAME,
         max: maxConnections,
-        idleTimeoutMillis: 10000,
-        connectionTimeoutMillis: 15000,
+        idleTimeoutMillis: 5000,
+        connectionTimeoutMillis: 20000,
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 5000,
+        allowExitOnIdle: true,
       });
     }
 
-    global._postgresPool.on('error', (err) => {
-      console.error('Unexpected error on idle SQL pool client:', err);
+    global._postgresPool.on('error', (err: Error & { code?: string }) => {
+      const msg = err?.message || '';
+      const code = err?.code || '';
+      const isTransientIdleDisconnect =
+        msg.includes('Connection terminated unexpectedly') ||
+        code === 'ECONNRESET' ||
+        code === 'EPIPE' ||
+        code === 'ETIMEDOUT' ||
+        code === '57P01' ||
+        code === '57P02' ||
+        code === '57P03';
+      if (isTransientIdleDisconnect) {
+        // pg.Pool automatically removes the dead idle client and reconnects on next query.
+        return;
+      }
+      console.error('Unexpected SQL pool error:', err?.message || err);
     });
   }
   return global._postgresPool;

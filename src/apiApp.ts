@@ -1,5 +1,5 @@
 import express from 'express';
-import { requireAuth, signAppToken, type AuthRequest } from './middleware/auth.ts';
+import { optionalAuth, requireAuth, signAppToken, type AuthRequest } from './middleware/auth.ts';
 import {
   EmailDeliveryNotConfiguredError,
   sendLockerQrUnlockEmail,
@@ -15,11 +15,13 @@ import {
   adminUpdateSlotDb,
   authenticateUserDb,
   cancelUnlockTokenDb,
+  coinWalkUpUnlockDb,
   completeGoogleOnboardingDb,
   createEmailVerificationDb,
   createUnlockTokenDb,
   endSessionDb,
   getBootstrapData,
+  getPublicStationStateDb,
   getStationSyncStateDb,
   getUnlockTokenByIdDb,
   recordTamperAlertDb,
@@ -37,7 +39,7 @@ import {
   formatCompartmentLabel,
 } from './constants/pricing.ts';
 import { formatSessionDateTime } from './utils/format.ts';
-import type { LockerStatus, ServiceType } from './types/index.ts';
+import type { LockerStatus, PaymentMethod, ServiceType } from './types/index.ts';
 
 export const apiApp = express();
 
@@ -251,6 +253,18 @@ apiApp.get('/api/bootstrap', requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
+apiApp.get('/api/kiosk/public-state', async (_req, res) => {
+  try {
+    const data = await getPublicStationStateDb();
+    res.json(data);
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : 'Failed to load public kiosk station state';
+    console.error('Public kiosk state route error:', error);
+    res.status(500).json({ error: message });
+  }
+});
+
 apiApp.get('/api/station/sync', requireAuth, async (req: AuthRequest, res) => {
   try {
     const uid = req.user!.uid;
@@ -269,12 +283,22 @@ apiApp.post('/api/wallet/topup', requireAuth, async (req: AuthRequest, res) => {
   try {
     const uid = req.user!.uid;
     const amount = Number(req.body?.amount);
-    if (!Number.isFinite(amount) || amount <= 0 || amount > 50000) {
-      return res.status(400).json({ error: 'Invalid top-up amount' });
+    const rawSource = typeof req.body?.source === 'string' ? req.body.source.trim().toLowerCase() : '';
+    const source =
+      rawSource === 'gcash' || rawSource === 'maya' || rawSource === 'gotyme'
+        ? rawSource
+        : 'wallet';
+    const referenceCode =
+      typeof req.body?.referenceCode === 'string' ? req.body.referenceCode.trim() : undefined;
+    if (!Number.isFinite(amount) || amount < 10 || amount > 5000) {
+      return res.status(400).json({ error: 'Invalid top-up amount (₱10–₱5,000).' });
     }
-    const user = await topUpWalletDb(uid, amount);
-    res.json({ user });
+    const result = await topUpWalletDb({ uid, amount, source, referenceCode });
+    res.json(result);
   } catch (error: unknown) {
+    if (error instanceof AuthValidationError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     const message = error instanceof Error ? error.message : 'Wallet top-up failed';
     console.error('Topup route error:', error);
     res.status(500).json({ error: message });
@@ -332,11 +356,7 @@ apiApp.post('/api/kiosk/unlock-tokens', requireAuth, async (req: AuthRequest, re
       serviceType: String(serviceType || 'charging') as ServiceType,
       ...(typeof pricingTier === 'string' && pricingTier.trim() ? { pricingTier } : {}),
       durationMinutes: Number(durationMinutes) || 120,
-      paymentMethod: String(paymentMethod || 'wallet') as
-        | 'wallet'
-        | 'gcash'
-        | 'maya'
-        | 'cash',
+      paymentMethod: String(paymentMethod || 'wallet') as PaymentMethod,
     });
 
     let emailSent = false;
@@ -459,18 +479,18 @@ apiApp.delete('/api/kiosk/unlock-tokens/:tokenId', requireAuth, async (req: Auth
   }
 });
 
-apiApp.post('/api/kiosk/door-state', requireAuth, async (req: AuthRequest, res) => {
+apiApp.post('/api/kiosk/door-state', optionalAuth, async (req: AuthRequest, res) => {
   try {
-    const uid = req.user!.uid;
-    const email = req.user!.email || '';
-    const syncState = await getStationSyncStateDb(uid, email);
+    const uid = req.user?.uid ?? null;
+    const email = req.user?.email || '';
+    const role = uid ? (await getStationSyncStateDb(uid, email)).user.role : null;
     const { stationId, slotNumber, isDoorOpen } = req.body ?? {};
     if (typeof slotNumber !== 'number') {
       return res.status(400).json({ error: 'Valid slotNumber is required.' });
     }
     const stations = await updateKioskDoorStateDb({
       uid,
-      role: syncState.user.role,
+      role,
       stationId: String(stationId || UNICHARGE_STATION_ID),
       slotNumber,
       isDoorOpen: Boolean(isDoorOpen),
@@ -487,9 +507,9 @@ apiApp.post('/api/kiosk/door-state', requireAuth, async (req: AuthRequest, res) 
   }
 });
 
-apiApp.post('/api/kiosk/tamper-alert', requireAuth, async (req: AuthRequest, res) => {
+apiApp.post('/api/kiosk/tamper-alert', optionalAuth, async (req: AuthRequest, res) => {
   try {
-    const uid = req.user!.uid;
+    const uid = req.user?.uid ?? null;
     const { stationId, slotNumber } = req.body ?? {};
     if (typeof slotNumber !== 'number') {
       return res.status(400).json({ error: 'Valid slotNumber is required.' });
@@ -501,6 +521,9 @@ apiApp.post('/api/kiosk/tamper-alert', requireAuth, async (req: AuthRequest, res
     });
     res.json({ ok: true, ...result });
   } catch (error: unknown) {
+    if (error instanceof AuthValidationError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     const message =
       error instanceof Error ? error.message : 'Failed to record tamper alert.';
     console.error('Tamper alert route error:', error);
@@ -508,14 +531,15 @@ apiApp.post('/api/kiosk/tamper-alert', requireAuth, async (req: AuthRequest, res
   }
 });
 
-apiApp.post('/api/kiosk/verify-unlock', requireAuth, async (req: AuthRequest, res) => {
+apiApp.post('/api/kiosk/verify-unlock', optionalAuth, async (req: AuthRequest, res) => {
   try {
-    const uid = req.user!.uid;
-    const { pinOrQrPayload, kioskStationId } = req.body ?? {};
+    const uid = req.user?.uid ?? null;
+    const { pinOrQrPayload, kioskStationId, coinInsertedAmount } = req.body ?? {};
     const result = await verifyAndConsumeUnlockTokenDb({
       actorUid: uid,
       pinOrQrPayload: String(pinOrQrPayload || ''),
       kioskStationId: String(kioskStationId || ''),
+      ...(typeof coinInsertedAmount === 'number' ? { coinInsertedAmount } : {}),
     });
     res.json(result);
   } catch (error: unknown) {
@@ -525,6 +549,38 @@ apiApp.post('/api/kiosk/verify-unlock', requireAuth, async (req: AuthRequest, re
     const message =
       error instanceof Error ? error.message : 'Failed to verify kiosk unlock pass.';
     console.error('Verify kiosk unlock error:', error);
+    res.status(500).json({ error: message });
+  }
+});
+
+apiApp.post('/api/kiosk/coin-unlock', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const uid = req.user?.uid ?? null;
+    const {
+      stationId,
+      slotNumber,
+      serviceType,
+      tierId,
+      coinInsertedAmount,
+      customPin,
+    } = req.body ?? {};
+    const result = await coinWalkUpUnlockDb({
+      uid,
+      stationId: String(stationId || UNICHARGE_STATION_ID),
+      slotNumber: Number(slotNumber),
+      serviceType: serviceType ? String(serviceType) : undefined,
+      tierId: tierId ? String(tierId) : undefined,
+      coinInsertedAmount: Number(coinInsertedAmount),
+      customPin: String(customPin || ''),
+    });
+    res.json(result);
+  } catch (error: unknown) {
+    if (error instanceof AuthValidationError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    const message =
+      error instanceof Error ? error.message : 'Failed to process coin walk-up unlock.';
+    console.error('Coin walk-up unlock error:', error);
     res.status(500).json({ error: message });
   }
 });
@@ -543,6 +599,9 @@ apiApp.post('/api/sessions/start', requireAuth, async (req: AuthRequest, res) =>
     });
     res.json(result);
   } catch (error: unknown) {
+    if (error instanceof AuthValidationError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     const message = error instanceof Error ? error.message : 'Failed to start session';
     console.error('Start session route error:', error);
     res.status(500).json({ error: message });
@@ -596,11 +655,15 @@ apiApp.post('/api/admin/slots/update', requireAuth, async (req: AuthRequest, res
     });
     res.json({ ok: true, stations });
   } catch (error: unknown) {
+    if (error instanceof AuthValidationError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     const message = error instanceof Error ? error.message : 'Failed to update slot';
     console.error('Admin slot update error:', error);
     res.status(500).json({ error: message });
   }
 });
+
 
 apiApp.post('/api/admin/alerts/resolve', requireAuth, async (req: AuthRequest, res) => {
   try {

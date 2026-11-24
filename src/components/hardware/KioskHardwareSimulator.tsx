@@ -2,10 +2,14 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import jsQR from 'jsqr';
 import { useUniCharge } from '../../context/UniChargeContext';
 import {
+  TOTAL_COMPARTMENT_COUNT,
   formatCompartmentCode,
   formatCompartmentLabel,
-  TOTAL_COMPARTMENT_COUNT,
+  getDefaultTierForService,
+  getTiersForService,
+  resolvePricingTier,
 } from '../../constants/pricing';
+import { PendingUnlockToken, PricingTierId, ServiceType } from '../../types';
 import { sound } from '../../utils/audio';
 import { QrMatrixSvg } from './QrMatrixSvg';
 import {
@@ -27,9 +31,11 @@ import {
   Upload,
   Loader2,
   Package,
+  Coins,
+  RotateCcw,
 } from 'lucide-react';
 
-type KioskScreenMode = 'idle' | 'scan_qr' | 'enter_pin';
+type KioskScreenMode = 'idle' | 'scan_qr' | 'enter_pin' | 'insert_coin';
 
 function formatCountdown(seconds: number): string {
   const mins = Math.floor(seconds / 60);
@@ -37,19 +43,33 @@ function formatCountdown(seconds: number): string {
   return `${mins}:${String(secs).padStart(2, '0')}`;
 }
 
-export const KioskHardwareSimulator: React.FC = () => {
+interface KioskHardwareSimulatorProps {
+  adminMonitorOnly?: boolean;
+}
+
+export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
+  adminMonitorOnly = false,
+}) => {
   const {
+    currentUser,
     stations,
     isKioskDoorOpen,
     activeKioskSlotReleased,
     closeKioskDoor,
     pendingUnlockToken,
     pendingSecondsLeft,
+    reservationTimeoutMessage,
+    clearReservationTimeout,
     verifyKioskUnlock,
+    unlockViaCoinWalkUp,
     regenerateUnlockToken,
     activeSession,
     triggerUnexpectedDoorOpen,
   } = useUniCharge();
+
+  const isAdminMonitor = Boolean(adminMonitorOnly || currentUser?.role === 'admin');
+  const hasStudentActiveSession =
+    currentUser?.role === 'student' && Boolean(activeSession && activeSession.status === 'active');
 
   const [screenMode, setScreenMode] = useState<KioskScreenMode>('idle');
   const [pinInput, setPinInput] = useState('');
@@ -62,7 +82,28 @@ export const KioskHardwareSimulator: React.FC = () => {
     text: string;
   } | null>(null);
 
+  // Coin Acceptor & Walk-Up Coin State (uses exact PRICING_TIERS)
+  const [coinInserted, setCoinInserted] = useState<number>(0);
+  const [coinService, setCoinService] = useState<ServiceType>('charging');
+  const [coinTierId, setCoinTierId] = useState<PricingTierId>('charging-short');
+  const [coinSlotNumber, setCoinSlotNumber] = useState<number | null>(null);
+  const [customWalkUpPin, setCustomWalkUpPin] = useState<string>('');
+  const [coinAuthTarget, setCoinAuthTarget] = useState<{
+    token: PendingUnlockToken;
+    payload: string;
+  } | null>(null);
+  const [lastWalkUpPin, setLastWalkUpPin] = useState<{
+    pin: string;
+    slotNumber: number;
+    tierName: string;
+    changeCredited: number;
+  } | null>(null);
+
+  // 30-Second Door Left Open Safety Timer
+  const [doorAjarSeconds, setDoorAjarSeconds] = useState<number>(0);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const scannerBayVideoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -79,6 +120,63 @@ export const KioskHardwareSimulator: React.FC = () => {
     (s) => s.category === 'storage' && s.status === 'available'
   ).length;
 
+  const coinTiers = getTiersForService(coinService);
+  const selectedWalkUpTier =
+    coinTiers.find((t) => t.id === coinTierId) || getDefaultTierForService(coinService);
+
+  const availableWalkUpSlots = currentStation.slots.filter(
+    (s) => s.status === 'available' && s.category === coinService
+  );
+
+  const resolvedWalkUpSlot =
+    availableWalkUpSlots.find((s) => s.slotNumber === coinSlotNumber) ||
+    availableWalkUpSlots[0] ||
+    null;
+
+  const requiredCoinFee = coinAuthTarget
+    ? coinAuthTarget.token.totalFee
+    : selectedWalkUpTier.fee;
+
+  useEffect(() => {
+    if (!coinAuthTarget) return;
+    if (
+      !pendingUnlockToken ||
+      pendingUnlockToken.tokenId !== coinAuthTarget.token.tokenId
+    ) {
+      setCoinAuthTarget(null);
+      setCoinInserted(0);
+      if (screenMode === 'insert_coin') {
+        setScreenMode('idle');
+      }
+    }
+  }, [coinAuthTarget, pendingUnlockToken, screenMode]);
+
+  useEffect(() => {
+    if (!isKioskDoorOpen || activeKioskSlotReleased === null) {
+      setDoorAjarSeconds(0);
+      return;
+    }
+
+    setDoorAjarSeconds(0);
+    const interval = window.setInterval(() => {
+      setDoorAjarSeconds((prev) => {
+        const next = prev + 1;
+        if (next === 30 || (next > 30 && next % 30 === 0)) {
+          sound.playBeep();
+        }
+        return next;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, [isKioskDoorOpen, activeKioskSlotReleased]);
+
+  useEffect(() => {
+    if (!activeSession && !isKioskDoorOpen && lastWalkUpPin) {
+      setLastWalkUpPin(null);
+    }
+  }, [activeSession, isKioskDoorOpen, lastWalkUpPin]);
+
   const stopCamera = useCallback(() => {
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
@@ -91,8 +189,22 @@ export const KioskHardwareSimulator: React.FC = () => {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    if (scannerBayVideoRef.current) {
+      scannerBayVideoRef.current.srcObject = null;
+    }
     setCameraActive(false);
   }, []);
+
+  useEffect(() => {
+    const bayVideo = scannerBayVideoRef.current;
+    if (!bayVideo) return;
+    if (cameraActive && screenMode === 'scan_qr' && streamRef.current) {
+      bayVideo.srcObject = streamRef.current;
+      void bayVideo.play().catch(() => {});
+    } else {
+      bayVideo.srcObject = null;
+    }
+  }, [cameraActive, screenMode]);
 
   const handleVerifyPayload = useCallback(
     async (payload: string) => {
@@ -100,6 +212,19 @@ export const KioskHardwareSimulator: React.FC = () => {
       setIsVerifying(true);
       try {
         const result = await verifyKioskUnlock(payload, currentStation.id);
+        if (result.requiresCoinPayment && result.token) {
+          stopCamera();
+          setPinInput('');
+          setCoinAuthTarget({ token: result.token, payload });
+          setCoinInserted(0);
+          setScreenMode('insert_coin');
+          setScanFeedback({
+            type: 'success',
+            text: result.message,
+          });
+          return;
+        }
+
         setScanFeedback({
           type: result.success ? 'success' : 'error',
           text: result.message,
@@ -107,6 +232,12 @@ export const KioskHardwareSimulator: React.FC = () => {
         if (result.success) {
           stopCamera();
           setPinInput('');
+          setCoinAuthTarget(null);
+          setCoinInserted(0);
+          setCustomWalkUpPin('');
+          if (result.action === 'retrieved') {
+            setLastWalkUpPin(null);
+          }
           setScreenMode('idle');
         }
       } finally {
@@ -116,6 +247,109 @@ export const KioskHardwareSimulator: React.FC = () => {
     },
     [currentStation.id, isVerifying, stopCamera, verifyKioskUnlock]
   );
+
+  const handleInsertCoin = (denomination: number) => {
+    const nextTotal = coinInserted + denomination;
+    if (coinInserted < requiredCoinFee && nextTotal >= requiredCoinFee) {
+      sound.playBeep();
+    } else {
+      sound.playTap();
+    }
+    setCoinInserted(nextTotal);
+  };
+
+  const handleConfirmCoinUnlock = async () => {
+    if (isVerifying) return;
+    setIsVerifying(true);
+    try {
+      if (coinAuthTarget) {
+        const result = await verifyKioskUnlock(
+          coinAuthTarget.payload,
+          currentStation.id,
+          coinInserted
+        );
+        setScanFeedback({
+          type: result.success ? 'success' : 'error',
+          text: result.message,
+        });
+        if (result.success) {
+          setCoinAuthTarget(null);
+          setCoinInserted(0);
+          setScreenMode('idle');
+        }
+        return;
+      }
+
+      if (isAdminMonitor) {
+        setScanFeedback({
+          type: 'error',
+          text: 'Admin Monitor Mode: Kiosk self-service is restricted to students and walk-in users.',
+        });
+        return;
+      }
+
+      if (!coinAuthTarget && hasStudentActiveSession && activeSession) {
+        setScanFeedback({
+          type: 'error',
+          text: `You already have an active session in ${formatCompartmentLabel(
+            activeSession.slotNumber
+          )}. Retrieve your item and end your session before using another compartment.`,
+        });
+        return;
+      }
+
+      if (!resolvedWalkUpSlot) {
+        setScanFeedback({
+          type: 'error',
+          text: `No free ${coinService} compartments right now.`,
+        });
+        return;
+      }
+
+      const trimmedCustomPin = customWalkUpPin.trim();
+      if (!/^\d{6}$/.test(trimmedCustomPin)) {
+        setScanFeedback({
+          type: 'error',
+          text: 'Please choose and enter a 6-digit Retrieval PIN before unlocking.',
+        });
+        return;
+      }
+
+      const tier = resolvePricingTier({
+        tierId: selectedWalkUpTier.id,
+        serviceType: coinService,
+        slotNumber: resolvedWalkUpSlot.slotNumber,
+      });
+
+      const res = await unlockViaCoinWalkUp({
+        stationId: currentStation.id,
+        slotNumber: resolvedWalkUpSlot.slotNumber,
+        serviceType: tier.serviceType,
+        tierId: tier.id,
+        coinInsertedAmount: coinInserted,
+        customPin: trimmedCustomPin,
+      });
+
+      setScanFeedback({
+        type: res.success ? 'success' : 'error',
+        text: res.message,
+      });
+
+      if (res.success) {
+        setLastWalkUpPin({
+          pin: res.retrievalPin || trimmedCustomPin,
+          slotNumber: resolvedWalkUpSlot.slotNumber,
+          tierName: tier.name,
+          changeCredited: res.coinChangeCredited || 0,
+        });
+        setCoinInserted(0);
+        setCustomWalkUpPin('');
+        setScreenMode('idle');
+      }
+    } finally {
+      setIsVerifying(false);
+    }
+  };
 
   const startCamera = useCallback(
     async (preferredFacing: 'environment' | 'user' = facingMode) => {
@@ -290,6 +524,32 @@ export const KioskHardwareSimulator: React.FC = () => {
     }
   };
 
+  const openCoinMode = () => {
+    sound.playTap();
+    if (isAdminMonitor) {
+      setScanFeedback({
+        type: 'error',
+        text: 'Admin Monitor Mode: Admins cannot initiate walk-up coin rentals. Use Compartment Control below for Force Unlock or Maintenance.',
+      });
+      return;
+    }
+    setScanFeedback(null);
+    if (
+      pendingUnlockToken &&
+      pendingUnlockToken.paymentMethod === 'cash' &&
+      pendingSecondsLeft > 0
+    ) {
+      setCoinAuthTarget({
+        token: pendingUnlockToken,
+        payload: pendingUnlockToken.pinCode,
+      });
+    } else {
+      setCoinAuthTarget(null);
+    }
+    setCoinInserted(0);
+    setScreenMode('insert_coin');
+  };
+
   return (
     <div className="flex flex-col h-full bg-[#F8FAFC] text-[#1E293B] p-4 sm:p-5 overflow-y-auto">
       <canvas ref={canvasRef} className="hidden" />
@@ -327,6 +587,24 @@ export const KioskHardwareSimulator: React.FC = () => {
           </span>
         </div>
       </div>
+
+      {/* Reservation Auto-Release Banner */}
+      {reservationTimeoutMessage && (
+        <div
+          role="status"
+          className="mb-4 max-w-4xl mx-auto w-full p-3 rounded-xl border bg-amber-50 border-amber-200 text-amber-900 text-xs font-medium flex items-start gap-2"
+        >
+          <Clock className="w-4 h-4 text-[#F59E0B] shrink-0 mt-0.5" />
+          <span className="flex-1">{reservationTimeoutMessage}</span>
+          <button
+            type="button"
+            onClick={clearReservationTimeout}
+            className="text-[11px] font-semibold underline cursor-pointer shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Kiosk Verification Toast */}
       {scanFeedback && (
@@ -379,21 +657,11 @@ export const KioskHardwareSimulator: React.FC = () => {
             {/* Unified 5-Column x 5-Row Locker Matrix matching 3D CAD Render */}
             <div className="flex-1 min-w-0 grid grid-cols-[repeat(5,minmax(0,1fr))] grid-rows-[repeat(5,minmax(62px,1fr))] gap-2">
               {/* Row 1: Charging 11, 12, 13, 14, 15 */}
-              <div className="col-start-1 row-start-1 min-w-0">
-                {renderCompartment(11)}
-              </div>
-              <div className="col-start-2 row-start-1 min-w-0">
-                {renderCompartment(12)}
-              </div>
-              <div className="col-start-3 row-start-1 min-w-0">
-                {renderCompartment(13)}
-              </div>
-              <div className="col-start-4 row-start-1 min-w-0">
-                {renderCompartment(14)}
-              </div>
-              <div className="col-start-5 row-start-1 min-w-0">
-                {renderCompartment(15)}
-              </div>
+              <div className="col-start-1 row-start-1 min-w-0">{renderCompartment(11)}</div>
+              <div className="col-start-2 row-start-1 min-w-0">{renderCompartment(12)}</div>
+              <div className="col-start-3 row-start-1 min-w-0">{renderCompartment(13)}</div>
+              <div className="col-start-4 row-start-1 min-w-0">{renderCompartment(14)}</div>
+              <div className="col-start-5 row-start-1 min-w-0">{renderCompartment(15)}</div>
 
               {/* Column 1: Storage S2 (rows 2-3), S1 (rows 4-5) */}
               <div className="col-start-1 row-start-2 row-span-2 min-w-0">
@@ -404,43 +672,23 @@ export const KioskHardwareSimulator: React.FC = () => {
               </div>
 
               {/* Column 2: Charging 04, 03, 02, 01 (rows 2-5) */}
-              <div className="col-start-2 row-start-2 min-w-0">
-                {renderCompartment(4)}
-              </div>
-              <div className="col-start-2 row-start-3 min-w-0">
-                {renderCompartment(3)}
-              </div>
-              <div className="col-start-2 row-start-4 min-w-0">
-                {renderCompartment(2)}
-              </div>
-              <div className="col-start-2 row-start-5 min-w-0">
-                {renderCompartment(1)}
-              </div>
+              <div className="col-start-2 row-start-2 min-w-0">{renderCompartment(4)}</div>
+              <div className="col-start-2 row-start-3 min-w-0">{renderCompartment(3)}</div>
+              <div className="col-start-2 row-start-4 min-w-0">{renderCompartment(2)}</div>
+              <div className="col-start-2 row-start-5 min-w-0">{renderCompartment(1)}</div>
 
               {/* Column 3: Storage S5 (rows 2-3) + Charging 10, 09 (rows 4-5) */}
               <div className="col-start-3 row-start-2 row-span-2 min-w-0">
                 {renderCompartment(20)}
               </div>
-              <div className="col-start-3 row-start-4 min-w-0">
-                {renderCompartment(10)}
-              </div>
-              <div className="col-start-3 row-start-5 min-w-0">
-                {renderCompartment(9)}
-              </div>
+              <div className="col-start-3 row-start-4 min-w-0">{renderCompartment(10)}</div>
+              <div className="col-start-3 row-start-5 min-w-0">{renderCompartment(9)}</div>
 
               {/* Column 4: Charging 08, 07, 06, 05 (rows 2-5) */}
-              <div className="col-start-4 row-start-2 min-w-0">
-                {renderCompartment(8)}
-              </div>
-              <div className="col-start-4 row-start-3 min-w-0">
-                {renderCompartment(7)}
-              </div>
-              <div className="col-start-4 row-start-4 min-w-0">
-                {renderCompartment(6)}
-              </div>
-              <div className="col-start-4 row-start-5 min-w-0">
-                {renderCompartment(5)}
-              </div>
+              <div className="col-start-4 row-start-2 min-w-0">{renderCompartment(8)}</div>
+              <div className="col-start-4 row-start-3 min-w-0">{renderCompartment(7)}</div>
+              <div className="col-start-4 row-start-4 min-w-0">{renderCompartment(6)}</div>
+              <div className="col-start-4 row-start-5 min-w-0">{renderCompartment(5)}</div>
 
               {/* Column 5: Storage S4 (rows 2-3), S3 (rows 4-5) */}
               <div className="col-start-5 row-start-2 row-span-2 min-w-0">
@@ -467,45 +715,89 @@ export const KioskHardwareSimulator: React.FC = () => {
               </div>
 
               {screenMode === 'idle' && (
-                <div className="flex-1 flex flex-col items-center justify-between py-1 space-y-2.5">
-                  <div className="bg-[#F8FAFC] p-2 rounded-xl border border-[#E2E8F0] shadow-xs">
-                    <QrMatrixSvg
-                      value={stationQrCode}
-                      size={96}
-                      foreground="#1E293B"
-                      accent="#5BC496"
-                    />
+                <div className="flex-1 flex flex-col items-center justify-between py-1 space-y-2">
+                  <div className="flex flex-col items-center">
+                    <span className="text-[9px] font-bold uppercase tracking-wider text-[#4E6E81] mb-1">
+                      Station QR · Mobile Pair
+                    </span>
+                    <div className="bg-[#F8FAFC] p-2 rounded-xl border border-[#E2E8F0] shadow-xs">
+                      <QrMatrixSvg
+                        value={stationQrCode}
+                        size={86}
+                        foreground="#1E293B"
+                        accent="#5BC496"
+                      />
+                    </div>
                   </div>
-                  <p className="text-[10px] text-[#64748B] leading-tight px-1">
-                    Tap Scan QR to hold your email QR pass to the scanner, or enter your 6-digit backup PIN.
+
+                  <p className="text-[10px] text-[#64748B] leading-snug px-1">
+                    Scan booking QR, enter 6-digit PIN, or click INSERT COIN below.
                   </p>
 
-                  <div className="w-full space-y-1.5">
-                    <button
-                      onClick={() => {
-                        sound.playTap();
-                        setScanFeedback(null);
-                        setScreenMode('scan_qr');
-                        void startCamera(facingMode);
-                      }}
-                      className="w-full h-9 rounded-xl bg-[#4E6E81] hover:bg-[#3D5767] text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-xs"
-                    >
-                      <Camera className="w-3.5 h-3.5 text-[#5BC496]" />
-                      <span>Scan QR</span>
-                    </button>
+                  {lastWalkUpPin && isKioskDoorOpen && activeKioskSlotReleased === lastWalkUpPin.slotNumber && (
+                    <div className="w-full px-2.5 py-1.5 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/50 text-left space-y-0.5">
+                      <span className="text-[9px] font-bold text-[#4E6E81] uppercase block">
+                        Your Retrieval PIN · {formatCompartmentLabel(lastWalkUpPin.slotNumber)}
+                      </span>
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-mono font-extrabold tracking-[0.2em] text-[#1E293B]">
+                          {lastWalkUpPin.pin}
+                        </span>
+                        <span className="text-[9px] font-mono text-[#64748B]">
+                          {lastWalkUpPin.tierName}
+                        </span>
+                      </div>
+                      <span className="text-[8px] text-[#4E6E81] block">
+                        Place phone inside &amp; close door · Enter PIN later to retrieve.
+                      </span>
+                    </div>
+                  )}
 
-                    <button
-                      onClick={() => {
-                        sound.playTap();
-                        setScanFeedback(null);
-                        setScreenMode('enter_pin');
-                      }}
-                      className="w-full h-8 rounded-xl bg-[#EDF2F5] hover:bg-[#E2E8F0] text-[#4E6E81] text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
-                    >
-                      <KeyRound className="w-3.5 h-3.5" />
-                      <span>Enter 6-Digit PIN</span>
-                    </button>
-                  </div>
+                  {isAdminMonitor ? (
+                    <div className="w-full space-y-2 text-left">
+                      <div className="p-2.5 rounded-xl bg-[#EDF2F5] border border-[#4E6E81]/30 space-y-1">
+                        <div className="flex items-center gap-1.5 text-[10px] font-bold text-[#4E6E81] uppercase">
+                          <ShieldCheck className="w-3.5 h-3.5 text-[#5BC496]" />
+                          <span>Admin Monitor Mode</span>
+                        </div>
+                        <p className="text-[10px] text-[#475569] leading-snug">
+                          Kiosk self-service (QR scan, PIN, and Insert Coin) is restricted to students and walk-in users.
+                        </p>
+                      </div>
+                      <p className="text-[9px] text-[#64748B] text-center leading-snug">
+                        Use <strong>Compartment Control</strong> below for Force Unlock or Maintenance locks.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="w-full space-y-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          sound.playTap();
+                          setScanFeedback(null);
+                          setScreenMode('scan_qr');
+                          void startCamera(facingMode);
+                        }}
+                        className="w-full h-8.5 rounded-xl bg-[#4E6E81] hover:bg-[#3D5767] text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-xs"
+                      >
+                        <Camera className="w-3.5 h-3.5 text-[#5BC496]" />
+                        <span>Scan QR</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          sound.playTap();
+                          setScanFeedback(null);
+                          setScreenMode('enter_pin');
+                        }}
+                        className="w-full h-8.5 rounded-xl bg-[#EDF2F5] hover:bg-[#E2E8F0] text-[#4E6E81] text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                      >
+                        <KeyRound className="w-3.5 h-3.5" />
+                        <span>6-Digit PIN</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -513,6 +805,7 @@ export const KioskHardwareSimulator: React.FC = () => {
                 <div className="flex-1 flex flex-col justify-between py-1 space-y-2">
                   <div className="flex items-center justify-between">
                     <button
+                      type="button"
                       onClick={() => {
                         sound.playTap();
                         stopCamera();
@@ -527,7 +820,7 @@ export const KioskHardwareSimulator: React.FC = () => {
                     </span>
                   </div>
 
-                  <div className="relative rounded-xl bg-[#1E293B] text-white flex flex-col items-center justify-center min-h-[148px] overflow-hidden border border-[#334155]">
+                  <div className="relative rounded-xl bg-[#1E293B] text-white flex flex-col items-center justify-center min-h-[144px] overflow-hidden border border-[#334155]">
                     <video
                       ref={videoRef}
                       playsInline
@@ -663,9 +956,10 @@ export const KioskHardwareSimulator: React.FC = () => {
               )}
 
               {screenMode === 'enter_pin' && (
-                <div className="flex-1 flex flex-col justify-between py-1 space-y-2">
+                <div className="flex-1 flex flex-col justify-between py-1 space-y-1.5">
                   <div className="flex items-center justify-between">
                     <button
+                      type="button"
                       onClick={() => {
                         sound.playTap();
                         setPinInput('');
@@ -689,6 +983,7 @@ export const KioskHardwareSimulator: React.FC = () => {
                       (key) => (
                         <button
                           key={key}
+                          type="button"
                           onClick={() => {
                             if (key === 'CLR') {
                               sound.playTap();
@@ -709,6 +1004,7 @@ export const KioskHardwareSimulator: React.FC = () => {
                   </div>
 
                   <button
+                    type="button"
                     disabled={pinInput.length < 6 || isVerifying}
                     onClick={() => void handleVerifyPayload(pinInput)}
                     className="w-full h-8 rounded-xl bg-[#5BC496] disabled:bg-[#E2E8F0] disabled:text-[#64748B] text-[#1E293B] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer hover:bg-[#48AD80] transition-colors"
@@ -719,6 +1015,250 @@ export const KioskHardwareSimulator: React.FC = () => {
                       <ShieldCheck className="w-3.5 h-3.5" />
                     )}
                     <span>{isVerifying ? 'Verifying...' : 'Verify & Unlatch'}</span>
+                  </button>
+
+                  <span className="text-[9px] text-[#64748B] leading-tight">
+                    Forgot phone or PIN? Request Admin Force Unlock.
+                  </span>
+                </div>
+              )}
+
+              {screenMode === 'insert_coin' && (
+                <div className="flex-1 flex flex-col justify-between py-1 space-y-2 text-left">
+                  <div className="flex items-center justify-between">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        sound.playTap();
+                        setCoinAuthTarget(null);
+                        setCoinInserted(0);
+                        setScreenMode('idle');
+                      }}
+                      className="text-[11px] font-semibold text-[#4E6E81] hover:text-[#1E293B] flex items-center gap-1 cursor-pointer"
+                    >
+                      <ArrowLeft className="w-3 h-3" /> Back
+                    </button>
+                    <span className="text-[10px] font-bold text-[#4E6E81] uppercase">
+                      {coinAuthTarget ? 'Pay Cash Booking' : 'Insert Coin'}
+                    </span>
+                  </div>
+
+                  {!coinAuthTarget && hasStudentActiveSession && activeSession && (
+                    <div className="p-2 rounded-xl bg-amber-50 border border-amber-300 text-[10px] text-amber-900 font-medium leading-snug">
+                      Active session in{' '}
+                      <strong>{formatCompartmentLabel(activeSession.slotNumber)}</strong>. Retrieve your item and end your session before opening another locker.
+                    </div>
+                  )}
+
+                  {coinAuthTarget ? (
+                    <div className="p-2 rounded-xl bg-[#EDF2F5] border border-[#4E6E81]/20 space-y-0.5 text-[10px]">
+                      <div className="font-bold text-[#1E293B] flex items-center justify-between">
+                        <span>{formatCompartmentLabel(coinAuthTarget.token.slotNumber)}</span>
+                        <span className="font-mono text-[#4E6E81]">
+                          ₱{coinAuthTarget.token.totalFee.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="text-[#64748B] flex items-center justify-between">
+                        <span>{coinAuthTarget.token.pricingTier}</span>
+                        <span className="font-mono">
+                          {formatCountdown(pendingSecondsLeft)} left
+                        </span>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {/* Service Switcher */}
+                      <div className="grid grid-cols-2 gap-1">
+                        {(['charging', 'storage'] as ServiceType[]).map((svc) => (
+                          <button
+                            key={svc}
+                            type="button"
+                            onClick={() => {
+                              sound.playTap();
+                              setCoinService(svc);
+                              setCoinTierId(getDefaultTierForService(svc).id);
+                              setCoinSlotNumber(null);
+                            }}
+                            className={`py-1 px-2 rounded-lg text-[10px] font-bold capitalize border cursor-pointer transition-colors ${
+                              coinService === svc
+                                ? 'bg-[#4E6E81] text-white border-[#4E6E81]'
+                                : 'bg-[#F8FAFC] text-[#4E6E81] border-[#E2E8F0] hover:bg-[#EDF2F5]'
+                            }`}
+                          >
+                            {svc === 'charging' ? 'Charging (₱10–20)' : 'Storage (₱10–40)'}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Exact Pricing Tiers matching E-Wallet */}
+                      <div className="grid grid-cols-2 gap-1">
+                        {coinTiers.map((tier) => {
+                          const isSel = selectedWalkUpTier.id === tier.id;
+                          return (
+                            <button
+                              key={tier.id}
+                              type="button"
+                              onClick={() => {
+                                sound.playTap();
+                                setCoinTierId(tier.id);
+                              }}
+                              className={`px-2 py-1 rounded-lg border text-left cursor-pointer transition-colors ${
+                                isSel
+                                  ? 'bg-[#EBF9F3] border-[#5BC496] text-[#1E293B]'
+                                  : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#64748B] hover:bg-[#EDF2F5]'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-1 text-[9px] font-bold">
+                                <span className="truncate">{tier.name.replace('Storage-', 'S-').replace('Charging-', 'C-')}</span>
+                                <span className="font-mono text-[#1E293B]">₱{tier.fee}</span>
+                              </div>
+                              <span className="text-[8px] font-mono text-[#64748B] block">
+                                {tier.durationLabel}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Touchscreen Free Locker Picker */}
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[9px]">
+                          <span className="font-bold text-[#4E6E81] uppercase">
+                            Select Free {coinService === 'charging' ? 'Charging' : 'Storage'} Door
+                          </span>
+                          <span className="font-mono text-[#64748B]">
+                            {availableWalkUpSlots.length} Free
+                          </span>
+                        </div>
+                        {availableWalkUpSlots.length === 0 ? (
+                          <div className="px-2 py-1.5 rounded-lg bg-red-50 border border-red-200 text-[9px] text-[#DC2626] font-medium">
+                            No FREE {coinService} lockers available right now.
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-5 gap-1 max-h-14 overflow-y-auto pr-0.5">
+                            {availableWalkUpSlots.map((slot) => {
+                              const isPicked = resolvedWalkUpSlot?.slotNumber === slot.slotNumber;
+                              const codeLabel =
+                                slot.category === 'charging'
+                                  ? `#${formatCompartmentCode(slot.slotNumber)}`
+                                  : formatCompartmentCode(slot.slotNumber);
+                              return (
+                                <button
+                                  key={slot.slotNumber}
+                                  type="button"
+                                  onClick={() => {
+                                    sound.playTap();
+                                    setCoinSlotNumber(slot.slotNumber);
+                                  }}
+                                  className={`py-0.5 rounded-md text-[9px] font-mono font-bold border cursor-pointer transition-colors ${
+                                    isPicked
+                                      ? 'bg-[#4E6E81] text-white border-[#4E6E81]'
+                                      : 'bg-[#EBF9F3] text-[#1E293B] border-[#5BC496]/50 hover:border-[#4E6E81]'
+                                  }`}
+                                >
+                                  {codeLabel}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* User-Chosen 6-Digit Retrieval PIN */}
+                      <div>
+                        <label className="text-[8px] font-bold text-[#64748B] uppercase block mb-0.5">
+                          Choose 6-Digit PIN (Required)
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          value={customWalkUpPin}
+                          onChange={(e) =>
+                            setCustomWalkUpPin(e.target.value.replace(/\D/g, '').slice(0, 6))
+                          }
+                          placeholder="Enter 6 digits"
+                          className="w-full h-7 px-2 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] focus:border-[#4E6E81] outline-hidden text-[10px] font-mono font-bold tracking-widest text-[#1E293B]"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {/* Coin Counter Readout */}
+                  <div className="px-2.5 py-2 rounded-xl bg-[#1E293B] text-white">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-slate-300">Inserted / Due</span>
+                      <span
+                        className={`font-mono font-bold ${
+                          coinInserted >= requiredCoinFee ? 'text-[#5BC496]' : 'text-amber-300'
+                        }`}
+                      >
+                        ₱{coinInserted.toFixed(2)} / ₱{requiredCoinFee.toFixed(2)}
+                      </span>
+                    </div>
+                    {coinInserted > requiredCoinFee && (
+                      <div className="text-[9px] text-[#5BC496] font-mono mt-0.5 text-right">
+                        {currentUser
+                          ? `+₱${(coinInserted - requiredCoinFee).toFixed(2)} change → E-Wallet`
+                          : `+₱${(coinInserted - requiredCoinFee).toFixed(2)} Coin Change Dispensed`}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Coin Denomination Buttons + Reset */}
+                  <div className="grid grid-cols-5 gap-1">
+                    {[1, 5, 10, 20].map((val) => (
+                      <button
+                        key={val}
+                        type="button"
+                        onClick={() => handleInsertCoin(val)}
+                        className="h-7 rounded-lg bg-[#EDF2F5] hover:bg-[#5BC496]/25 border border-[#E2E8F0] text-[10px] font-mono font-bold text-[#1E293B] cursor-pointer"
+                      >
+                        +₱{val}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      title="Return inserted coins"
+                      onClick={() => {
+                        sound.playTap();
+                        setCoinInserted(0);
+                      }}
+                      className="h-7 rounded-lg bg-[#F8FAFC] hover:bg-red-50 border border-[#E2E8F0] text-[#64748B] hover:text-[#DC2626] flex items-center justify-center cursor-pointer"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={
+                      isVerifying ||
+                      isAdminMonitor ||
+                      (!coinAuthTarget && hasStudentActiveSession) ||
+                      coinInserted < requiredCoinFee ||
+                      (!coinAuthTarget &&
+                        (!resolvedWalkUpSlot || !/^\d{6}$/.test(customWalkUpPin.trim())))
+                    }
+                    onClick={() => void handleConfirmCoinUnlock()}
+                    className="w-full h-8 rounded-xl bg-[#5BC496] disabled:bg-[#E2E8F0] disabled:text-[#64748B] text-[#1E293B] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer hover:bg-[#48AD80] transition-colors"
+                  >
+                    {isVerifying ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Coins className="w-3.5 h-3.5" />
+                    )}
+                    <span>
+                      {isVerifying
+                        ? 'Unlocking...'
+                        : !coinAuthTarget && hasStudentActiveSession
+                        ? 'End Active Session First'
+                        : coinInserted < requiredCoinFee
+                        ? `Insert ₱${(requiredCoinFee - coinInserted).toFixed(0)} more`
+                        : !coinAuthTarget && !/^\d{6}$/.test(customWalkUpPin.trim())
+                        ? 'Enter 6-Digit PIN'
+                        : `Unlatch Locker (₱${requiredCoinFee})`}
+                    </span>
                   </button>
                 </div>
               )}
@@ -735,29 +1275,102 @@ export const KioskHardwareSimulator: React.FC = () => {
             <div className="grid grid-cols-2 gap-2.5">
               <button
                 type="button"
+                disabled={isAdminMonitor}
+                title={
+                  isAdminMonitor
+                    ? 'Student-only kiosk scanner (Admin Monitor Mode)'
+                    : 'Open kiosk QR scanner'
+                }
                 onClick={() => {
+                  if (isAdminMonitor) return;
                   sound.playTap();
                   setScreenMode('scan_qr');
                   void startCamera(facingMode);
                 }}
-                className="p-2.5 rounded-2xl bg-[#27333C] hover:bg-[#1E293B] border border-[#1E293B] text-center cursor-pointer transition-colors shadow-sm"
+                className={`p-2.5 rounded-2xl border text-center transition-colors shadow-sm ${
+                  isAdminMonitor
+                    ? 'bg-[#27333C]/65 border-[#1E293B]/60 opacity-60 cursor-not-allowed'
+                    : screenMode === 'scan_qr'
+                    ? 'bg-[#1E293B] border-[#5BC496] ring-1 ring-[#5BC496]/60 cursor-pointer'
+                    : 'bg-[#27333C] hover:bg-[#1E293B] border-[#1E293B] cursor-pointer'
+                }`}
               >
                 <span className="text-[9px] font-bold text-slate-200 uppercase tracking-wider block mb-1.5">
-                  SCAN QR CODE
+                  {screenMode === 'scan_qr'
+                    ? cameraActive
+                      ? 'OPTICAL LENS LIVE'
+                      : 'SCANNING QR...'
+                    : 'SCAN QR CODE'}
                 </span>
-                <div className="mx-auto w-12 h-6 rounded-md bg-[#111827] border border-slate-600 flex items-center justify-center">
-                  <span className="w-8 h-2 rounded-xs bg-rose-400/90 shadow-[0_0_6px_#fb7185]" />
+                <div
+                  className={`mx-auto relative overflow-hidden rounded-lg bg-[#111827] border flex items-center justify-center transition-all duration-200 ${
+                    screenMode === 'scan_qr'
+                      ? 'w-24 h-12 border-[#5BC496]/80 shadow-[0_0_10px_rgba(91,196,150,0.3)]'
+                      : 'w-12 h-6 border-slate-600'
+                  }`}
+                >
+                  <video
+                    ref={scannerBayVideoRef}
+                    playsInline
+                    muted
+                    className={`w-full h-full object-cover ${
+                      cameraActive && screenMode === 'scan_qr' ? 'block' : 'hidden'
+                    }`}
+                  />
+                  {cameraActive && screenMode === 'scan_qr' ? (
+                    <>
+                      <div className="absolute inset-1 border border-dashed border-[#5BC496]/85 rounded-sm pointer-events-none" />
+                      <span className="absolute left-1 right-1 top-1/2 -translate-y-1/2 h-0.5 bg-[#5BC496] shadow-[0_0_8px_#5BC496] animate-pulse pointer-events-none" />
+                    </>
+                  ) : (
+                    <span
+                      className={`w-8 h-2 rounded-xs transition-colors ${
+                        screenMode === 'scan_qr'
+                          ? 'bg-[#5BC496] shadow-[0_0_8px_#5BC496] animate-pulse'
+                          : 'bg-rose-400/90 shadow-[0_0_6px_#fb7185]'
+                      }`}
+                    />
+                  )}
                 </div>
               </button>
 
-              <div className="p-2.5 rounded-2xl bg-[#27333C] border border-[#1E293B] text-center shadow-sm">
+              <button
+                type="button"
+                disabled={isAdminMonitor}
+                title={
+                  isAdminMonitor
+                    ? 'Student/walk-in coin acceptor (Admin Monitor Mode)'
+                    : screenMode === 'insert_coin'
+                    ? 'Click to insert +₱5 coin'
+                    : 'Click to open Coin Acceptor'
+                }
+                onClick={() => {
+                  if (isAdminMonitor) return;
+                  if (screenMode === 'insert_coin') {
+                    handleInsertCoin(5);
+                  } else {
+                    openCoinMode();
+                  }
+                }}
+                className={`p-2.5 rounded-2xl border text-center transition-colors shadow-sm ${
+                  isAdminMonitor
+                    ? 'bg-[#27333C]/65 border-[#1E293B]/60 opacity-60 cursor-not-allowed'
+                    : screenMode === 'insert_coin'
+                    ? 'bg-[#1E293B] border-[#5BC496] ring-1 ring-[#5BC496]/60 cursor-pointer'
+                    : 'bg-[#27333C] hover:bg-[#1E293B] border-[#1E293B] cursor-pointer'
+                }`}
+              >
                 <span className="text-[9px] font-bold text-slate-200 uppercase tracking-wider block mb-1.5">
-                  INSERT COIN
+                  {screenMode === 'insert_coin' ? 'DROP +₱5 COIN' : 'INSERT COIN'}
                 </span>
                 <div className="mx-auto w-10 h-6 rounded-md bg-[#111827] border border-slate-600 flex items-center justify-center">
-                  <span className="w-1 h-4 rounded-full bg-slate-200" />
+                  <span
+                    className={`w-1 h-4 rounded-full ${
+                      screenMode === 'insert_coin' ? 'bg-[#5BC496]' : 'bg-slate-200'
+                    }`}
+                  />
                 </div>
-              </div>
+              </button>
             </div>
           </div>
         </div>
@@ -785,20 +1398,53 @@ export const KioskHardwareSimulator: React.FC = () => {
         </div>
       </div>
 
-      {/* Physical Door Push Simulator when a solenoid unlatches */}
+      {/* Physical Door Push Simulator when a solenoid unlatches (with 30s Safety Reminder) */}
       {isKioskDoorOpen && activeKioskSlotReleased && (
-        <div className="mt-4 p-4 rounded-2xl bg-[#FFFFFF] border-2 border-[#5BC496] shadow-md max-w-2xl mx-auto w-full text-center">
+        <div
+          className={`mt-4 p-4 rounded-2xl bg-[#FFFFFF] border-2 shadow-md max-w-2xl mx-auto w-full text-center transition-colors ${
+            doorAjarSeconds >= 30 ? 'border-[#F59E0B] bg-amber-50/40' : 'border-[#5BC496]'
+          }`}
+        >
           <div className="flex items-center justify-center gap-2 text-[#1E293B] font-bold text-xs mb-1">
-            <Unlock className="w-4 h-4 text-[#5BC496]" />
+            {doorAjarSeconds >= 30 ? (
+              <AlertTriangle className="w-4 h-4 text-[#F59E0B] animate-pulse" />
+            ) : (
+              <Unlock className="w-4 h-4 text-[#5BC496]" />
+            )}
             <span>
               {formatCompartmentLabel(activeKioskSlotReleased)} Door is Currently Ajar
             </span>
+            <span
+              className={`px-2 py-0.5 rounded-md text-[10px] font-mono ${
+                doorAjarSeconds >= 30
+                  ? 'bg-amber-100 text-[#B45309]'
+                  : 'bg-[#EBF9F3] text-[#059669]'
+              }`}
+            >
+              Open {formatCountdown(doorAjarSeconds)}
+            </span>
           </div>
-          <p className="text-xs text-[#64748B] mb-3">
-            Place your device or belongings inside and physically push the door shut to re-engage the solenoid latch.
+          <p
+            className={`text-xs mb-3 ${
+              doorAjarSeconds >= 30 ? 'text-[#B45309] font-medium' : 'text-[#64748B]'
+            }`}
+          >
+            {doorAjarSeconds >= 30
+              ? 'Safety Reminder (30s+): Please push the compartment door closed to re-engage the solenoid latch and secure your belongings.'
+              : lastWalkUpPin && lastWalkUpPin.slotNumber === activeKioskSlotReleased
+              ? `Place your phone inside & push the door closed — use Retrieval PIN ${lastWalkUpPin.pin} on the Touchscreen UI later to unlock.`
+              : 'Place or retrieve your belongings and physically push the door shut to re-engage the solenoid latch.'}
           </p>
           <button
-            onClick={() => closeKioskDoor(activeKioskSlotReleased)}
+            onClick={() => {
+              closeKioskDoor(activeKioskSlotReleased);
+              setLastWalkUpPin(null);
+              setPinInput('');
+              setCoinInserted(0);
+              setCoinAuthTarget(null);
+              setCustomWalkUpPin('');
+              setScreenMode('idle');
+            }}
             className="w-full h-10 rounded-xl bg-[#5BC496] text-[#1E293B] font-bold text-xs flex items-center justify-center gap-2 hover:bg-[#48AD80] active:scale-[0.98] transition-all cursor-pointer shadow-sm"
           >
             <Lock className="w-4 h-4" />
@@ -824,7 +1470,7 @@ export const KioskHardwareSimulator: React.FC = () => {
       <div
         key={slotNumber}
         title={formatCompartmentLabel(slotNumber)}
-        className={`h-full w-full min-w-0 overflow-hidden rounded-xl p-2 border-2 transition-all relative flex flex-col justify-between ${
+        className={`h-full w-full min-w-0 overflow-hidden rounded-xl p-2 border-2 transition-all relative flex flex-col justify-between select-none ${
           isBusy && isOpen
             ? 'bg-amber-50 border-[#F59E0B] shadow-md'
             : isOpen

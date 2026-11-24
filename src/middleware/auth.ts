@@ -244,3 +244,32 @@ export const requireAuth = async (
     return res.status(401).json({ error: 'Unauthorized: Invalid token' });
   }
 };
+
+export const optionalAuth = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    req.user = undefined;
+    return next();
+  }
+
+  const token = authHeader.split('Bearer ')[1];
+  if (!token || !token.trim()) {
+    req.user = undefined;
+    return next();
+  }
+
+  try {
+    const decodedToken = token.startsWith(APP_TOKEN_PREFIX)
+      ? verifyAppToken(token)
+      : await verifyFirebaseIdToken(token);
+    req.user = decodedToken;
+    return next();
+  } catch (error) {
+    console.error('Error verifying optional auth token:', error);
+    return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+  }
+};

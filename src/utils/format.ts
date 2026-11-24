@@ -11,6 +11,14 @@ export function formatDuration(minutes: number): string {
   return `${hourText} ${remainingMinutes} ${remainingMinutes === 1 ? 'min' : 'mins'}`;
 }
 
+export function formatSessionTimer(totalSecs: number): string {
+  const safeSecs = Math.max(0, Math.floor(totalSecs));
+  const hours = Math.floor(safeSecs / 3600);
+  const mins = Math.floor((safeSecs % 3600) / 60);
+  const secs = safeSecs % 60;
+  return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
 export function formatSessionDateTime(input: number | Date): string {
   const parsed = input instanceof Date ? input : new Date(input);
   const validDate = Number.isNaN(parsed.getTime()) ? new Date() : parsed;

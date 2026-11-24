@@ -267,11 +267,6 @@ export const PortalLayout: React.FC = () => {
           </button>
 
           <UniChargeLogo variant="horizontal" size="sm" />
-
-          <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-[#EDF2F5] text-[#4E6E81] text-[10px] font-bold tracking-wider uppercase whitespace-nowrap">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#5BC496]" />
-            {isAdmin ? 'ADMIN PORTAL' : 'STUDENT PORTAL'}
-          </span>
         </div>
 
         {/* Right: E-Wallet (Student) + Bell + User Profile */}

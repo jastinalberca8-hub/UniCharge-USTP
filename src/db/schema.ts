@@ -77,9 +77,7 @@ export const lockerSlots = pgTable('locker_slots', {
 export const sessions = pgTable('sessions', {
   id: serial('id').primaryKey(),
   sessionId: text('session_id').notNull().unique(),
-  userUid: text('user_uid')
-    .references(() => users.uid)
-    .notNull(),
+  userUid: text('user_uid').references(() => users.uid),
   stationId: text('station_id').notNull(),
   stationName: text('station_name').notNull(),
   building: text('building').notNull(),
@@ -99,6 +97,7 @@ export const sessions = pgTable('sessions', {
     .default(true),
   isTamperAlertArmed: boolean('is_tamper_alert_armed').notNull().default(true),
   status: text('status').notNull().default('active'),
+  paymentMethod: text('payment_method').notNull().default('wallet'),
   qrVerificationCode: text('qr_verification_code').notNull(),
   receiptNumber: text('receipt_number'),
   dateLabel: text('date_label'),
@@ -140,8 +139,27 @@ export const securityAlerts = pgTable('security_alerts', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+export const walletTransactions = pgTable('wallet_transactions', {
+  id: serial('id').primaryKey(),
+  txId: text('tx_id').notNull().unique(),
+  userUid: text('user_uid')
+    .references(() => users.uid)
+    .notNull(),
+  kind: text('kind').notNull(),
+  paymentSource: text('payment_source').notNull(),
+  title: text('title').notNull(),
+  referenceCode: text('reference_code').notNull(),
+  amount: doublePrecision('amount').notNull(),
+  walletDelta: doublePrecision('wallet_delta').notNull().default(0),
+  balanceAfter: doublePrecision('balance_after').notNull(),
+  dateLabel: text('date_label').notNull(),
+  createdAtMs: doublePrecision('created_at_ms').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 export const usersRelations = relations(users, ({ many }) => ({
   sessions: many(sessions),
+  walletTransactions: many(walletTransactions),
 }));
 
 export const stationsRelations = relations(stations, ({ many }) => ({

@@ -36,7 +36,7 @@ export const SEEDED_USERS: UserAccount[] = [
   {
     id: 'usr_ustp_admin_reanoza',
     name: 'Reanoza Marilex Basañes Rabosa',
-    studentIdNumber: 'ADMIN-05',
+    studentIdNumber: 'ADMIN',
     email: 'reanoza.ustp.ph',
     password: 'reanoza123',
     role: 'admin',

@@ -461,7 +461,7 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                 Compartment Control ({station.campusCode})
               </h2>
               <p className="text-xs text-[#64748B]">
-                Force-unlock individual 12V solenoids or lock compartments for maintenance.
+                Force Free opens a locker only when it has no active session; active session records are never changed. Any unused QR reservation is invalidated.
               </p>
             </div>
             <span className="text-xs font-mono text-[#64748B]">
@@ -545,19 +545,34 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                   <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       type="button"
+                      disabled={togglingSlotNumber === slot.slotNumber}
                       onClick={() => {
-                        setHardwareFeedback(null);
-                        adminRemoteUnlockSlot(station.id, slot.slotNumber);
-                        setHardwareFeedback({
-                          type: 'success',
-                          text: `${formatCompartmentLabel(slot.slotNumber)} force-unlocked & reset to Available.`,
-                        });
+                        void (async () => {
+                          setHardwareFeedback(null);
+                          setTogglingSlotNumber(slot.slotNumber);
+                          try {
+                            const result = await adminRemoteUnlockSlot(
+                              station.id,
+                              slot.slotNumber
+                            );
+                            setHardwareFeedback({
+                              type: result.success ? 'success' : 'error',
+                              text: result.message,
+                            });
+                          } finally {
+                            setTogglingSlotNumber(null);
+                          }
+                        })();
                       }}
-                      title="Force Unlock Compartment"
-                      className="px-2.5 py-1.5 rounded-lg bg-[#4E6E81] text-white text-[11px] font-semibold hover:bg-[#3D5767] flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap"
+                      title="Force Free and unlock only if no active session exists"
+                      className="px-2.5 py-1.5 rounded-lg bg-[#4E6E81] text-white text-[11px] font-semibold hover:bg-[#3D5767] flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <Unlock className="w-3 h-3 text-[#5BC496]" />
-                      <span>Force Unlock</span>
+                      <span>
+                        {togglingSlotNumber === slot.slotNumber
+                          ? 'Unlocking...'
+                          : 'Force Free'}
+                      </span>
                     </button>
                     <button
                       type="button"

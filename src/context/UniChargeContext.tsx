@@ -233,7 +233,10 @@ interface UniChargeContextType {
   markAllNotificationsRead: () => Promise<void>;
   deleteNotification: (id: string) => Promise<void>;
   // Admin Methods
-  adminRemoteUnlockSlot: (stationId: string, slotNumber: number) => void;
+  adminRemoteUnlockSlot: (
+    stationId: string,
+    slotNumber: number
+  ) => Promise<{ success: boolean; message: string }>;
   adminToggleSlotMaintenance: (
     stationId: string,
     slotNumber: number
@@ -3061,52 +3064,99 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     });
   };
 
-  const adminRemoteUnlockSlot = (stationId: string, slotNumber: number) => {
-    if (currentUser?.role !== 'admin') return;
+  const adminRemoteUnlockSlot = async (
+    stationId: string,
+    slotNumber: number
+  ): Promise<{ success: boolean; message: string }> => {
+    if (currentUser?.role !== 'admin') {
+      return { success: false, message: 'Admin privileges required.' };
+    }
+
+    const activeSession = adminStationActivity.activeSessions.find(
+      (session) =>
+        session.kind === 'active' &&
+        session.stationId === stationId &&
+        session.slotNumber === slotNumber
+    );
+    if (activeSession) {
+      return {
+        success: false,
+        message: `${formatCompartmentLabel(
+          slotNumber
+        )} has an active session. Force Free was blocked to protect it.`,
+      };
+    }
+
+    const targetStation = stations.find((station) => station.id === stationId);
+    if (!targetStation?.slots.some((slot) => slot.slotNumber === slotNumber)) {
+      return { success: false, message: 'Compartment not found.' };
+    }
+
+    if (isBackendSessionRef.current) {
+      try {
+        const data = await authorizedFetch('/api/admin/slots/update', {
+          method: 'POST',
+          body: JSON.stringify({
+            stationId,
+            slotNumber,
+            status: 'available',
+            isDoorOpen: true,
+            isLocked: false,
+          }),
+        });
+        if (!Array.isArray(data?.stations) || data.stations.length === 0) {
+          return {
+            success: false,
+            message: 'Session expired or station update was not returned. Please sign in and retry.',
+          };
+        }
+
+        const nextStations = data.stations as KioskStation[];
+        setStations(nextStations);
+        setSelectedStation(
+          (prev) => nextStations.find((station) => station.id === prev.id) || nextStations[0]
+        );
+        setHardwareKioskStationId(stationId);
+        setIsKioskDoorOpen(true);
+        setActiveKioskSlotReleased(slotNumber);
+        sound.playSolenoidRelease();
+        notifyStationSync();
+        return {
+          success: true,
+          message: `${formatCompartmentLabel(slotNumber)} force-unlocked and marked Free. No active session was changed.`,
+        };
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to force-free compartment.';
+        console.error('Admin force-free failed:', error);
+        void syncStationState();
+        return { success: false, message };
+      }
+    }
+
     sound.playSolenoidRelease();
     setHardwareKioskStationId(stationId);
     setIsKioskDoorOpen(true);
     setActiveKioskSlotReleased(slotNumber);
-
     setStations((prev) =>
-      prev.map((st) => {
-        if (st.id !== stationId) return st;
-        const updatedSlots = st.slots.map((s) =>
-          s.slotNumber === slotNumber
-            ? { ...s, status: 'available' as const, isDoorOpen: true, isLocked: false }
-            : s
+      prev.map((station) => {
+        if (station.id !== stationId) return station;
+        const updatedSlots = station.slots.map((slot) =>
+          slot.slotNumber === slotNumber
+            ? { ...slot, status: 'available' as const, isDoorOpen: true, isLocked: false }
+            : slot
         );
         return {
-          ...st,
+          ...station,
           slots: updatedSlots,
-          availableSlots: updatedSlots.filter((s) => s.status === 'available').length,
+          availableSlots: updatedSlots.filter((slot) => slot.status === 'available').length,
         };
       })
     );
-
-    if (isBackendSessionRef.current) {
-      authorizedFetch('/api/admin/slots/update', {
-        method: 'POST',
-        body: JSON.stringify({
-          stationId,
-          slotNumber,
-          status: 'available',
-          isDoorOpen: true,
-          isLocked: false,
-        }),
-      })
-        .then((data) => {
-          if (Array.isArray(data?.stations) && data.stations.length > 0) {
-            const nextStations = data.stations as KioskStation[];
-            setStations(nextStations);
-            setSelectedStation(
-              (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
-            );
-          }
-          notifyStationSync();
-        })
-        .catch((err) => console.error('Admin unlock sync failed:', err));
-    }
+    return {
+      success: true,
+      message: `${formatCompartmentLabel(slotNumber)} force-unlocked and marked Free.`,
+    };
   };
 
   const adminToggleSlotMaintenance = async (

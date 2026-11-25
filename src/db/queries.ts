@@ -3734,6 +3734,45 @@ export async function adminUpdateSlotDb(params: {
 }): Promise<KioskStation[]> {
   try {
     await db.transaction(async (tx) => {
+      if (params.status === 'available') {
+        const [activeOnSlot, currentSlotRows] = await Promise.all([
+          tx
+            .select({ id: sessions.id })
+            .from(sessions)
+            .where(
+              and(
+                eq(sessions.stationId, params.stationId),
+                eq(sessions.slotNumber, params.slotNumber),
+                eq(sessions.status, 'active')
+              )
+            )
+            .limit(1),
+          tx
+            .select({ id: lockerSlots.id })
+            .from(lockerSlots)
+            .where(
+              and(
+                eq(lockerSlots.stationId, params.stationId),
+                eq(lockerSlots.slotNumber, params.slotNumber)
+              )
+            )
+            .limit(1),
+        ]);
+
+        if (!currentSlotRows[0]) {
+          throw new AuthValidationError(
+            `${formatCompartmentLabel(params.slotNumber)} was not found at this station.`
+          );
+        }
+        if (activeOnSlot[0]) {
+          throw new AuthValidationError(
+            `${formatCompartmentLabel(
+              params.slotNumber
+            )} has an active session. Force Free was blocked to protect that session; retrieve or end it through the normal session flow first.`
+          );
+        }
+      }
+
       if (params.status === 'maintenance') {
         const [activeOnSlot, currentSlotRows] = await Promise.all([
           tx
@@ -3803,22 +3842,6 @@ export async function adminUpdateSlotDb(params: {
         );
 
       if (params.status === 'available') {
-        await tx
-          .update(sessions)
-          .set({
-            status: 'completed',
-            remainingSeconds: 0,
-            receiptNumber: 'ADMIN-OVERRIDE',
-            dateLabel: 'Admin Unlocked',
-          })
-          .where(
-            and(
-              eq(sessions.stationId, params.stationId),
-              eq(sessions.slotNumber, params.slotNumber),
-              eq(sessions.status, 'active')
-            )
-          );
-
         await tx
           .update(lockerUnlockTokens)
           .set({ used: true })

@@ -85,9 +85,11 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const qrImageInputRef = useRef<HTMLInputElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
   const scanLockRef = useRef<boolean>(false);
+  const cameraRequestRef = useRef<number>(0);
 
   const currentStation = stations[0];
 
@@ -135,6 +137,7 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
   }, [isKioskDoorOpen, activeKioskSlotReleased]);
 
   const stopCamera = useCallback(() => {
+    cameraRequestRef.current += 1;
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -245,6 +248,7 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
   const startCamera = useCallback(
     async (preferredFacing: 'environment' | 'user' = facingMode) => {
       stopCamera();
+      const requestId = cameraRequestRef.current;
       setCameraError(null);
       scanLockRef.current = false;
 
@@ -268,14 +272,33 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
           },
           audio: false,
         });
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play().catch(() => {});
+        if (requestId !== cameraRequestRef.current) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
         }
+        streamRef.current = stream;
+        const video = videoRef.current;
+        if (!video) {
+          throw new Error('The scanner preview is not ready.');
+        }
+        video.srcObject = stream;
+        await video.play();
+        if (requestId !== cameraRequestRef.current) return;
         setCameraActive(true);
       } catch (err: unknown) {
-        const name = err instanceof DOMException ? err.name : '';
+        if (requestId !== cameraRequestRef.current) return;
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+        }
+        if (videoRef.current) videoRef.current.srcObject = null;
+        setCameraActive(false);
+        const name =
+          err instanceof DOMException
+            ? err.name
+            : err instanceof Error
+            ? err.name
+            : '';
         if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
           setCameraError(
             'Camera permission was blocked. Allow camera access or use the 6-digit PIN below.'
@@ -284,9 +307,13 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
           setCameraError(
             'No camera detected on this device. Use the 6-digit PIN below.'
           );
+        } else if (name === 'NotReadableError' || name === 'TrackStartError') {
+          setCameraError(
+            'The camera is busy, possibly being used by OBS or another app. Upload a QR image or use the 6-digit PIN below.'
+          );
         } else {
           setCameraError(
-            'Could not start the camera. Use the 6-digit PIN below.'
+            'Could not start the camera. Upload a QR image or use the 6-digit PIN below.'
           );
         }
       }
@@ -299,10 +326,58 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
       stopCamera();
       setCameraError(null);
     }
-    return () => {
-      stopCamera();
-    };
   }, [screenMode, stopCamera]);
+
+  useEffect(
+    () => () => {
+      stopCamera();
+    },
+    [stopCamera]
+  );
+
+  const handleQrImageUpload = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+
+    let image: ImageBitmap | null = null;
+    try {
+      image = await createImageBitmap(file);
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext('2d', { willReadFrequently: true });
+      if (!canvas || !ctx) {
+        throw new Error('Unable to read the selected QR image.');
+      }
+
+      canvas.width = image.width;
+      canvas.height = image.height;
+      ctx.drawImage(image, 0, 0);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const decoded = jsQR(imageData.data, imageData.width, imageData.height, {
+        inversionAttempts: 'attemptBoth',
+      });
+      if (!decoded?.data) {
+        setScanFeedback({
+          type: 'error',
+          text: 'No QR code was found in that image. Choose a clear image of your UniCharge booking QR.',
+        });
+        return;
+      }
+
+      scanLockRef.current = true;
+      stopCamera();
+      await handleVerifyPayload(decoded.data);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to read the selected QR image.';
+      setScanFeedback({ type: 'error', text: message });
+    } finally {
+      image?.close();
+    }
+  };
 
   useEffect(() => {
     if (!cameraActive || screenMode !== 'scan_qr') return;
@@ -660,6 +735,21 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
                             >
                               <Camera className="w-3 h-3" />
                               <span>Start Camera</span>
+                            </button>
+                            <input
+                              ref={qrImageInputRef}
+                              type="file"
+                              accept="image/*"
+                              onChange={handleQrImageUpload}
+                              className="hidden"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => qrImageInputRef.current?.click()}
+                              className="w-full py-1.5 px-2.5 rounded-lg bg-[#334155] hover:bg-[#475569] text-white text-[10px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                            >
+                              <QrCode className="w-3 h-3" />
+                              <span>Upload QR Image</span>
                             </button>
                           </>
                         )}

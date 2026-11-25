@@ -296,6 +296,7 @@ export async function sendLockerQrUnlockEmail(params: {
   pricingTier: string;
   durationMinutes: number;
   totalFee: number;
+  paymentMethod?: string;
   pinCode: string;
   qrPayload: string;
   tokenId: string;
@@ -320,17 +321,20 @@ export async function sendLockerQrUnlockEmail(params: {
   const safeTier = escapeHtml(params.pricingTier);
   const safePin = escapeHtml(params.pinCode);
   const safeToken = escapeHtml(params.tokenId);
+  const isCoinPayment = params.paymentMethod === 'cash';
 
   const subject = `UniCharge USTP Locker Pass - ${params.stationCode} ${params.compartmentLabel}`;
   const text = [
     `Hi ${params.recipientName || 'Student'},`,
     '',
     `Your UniCharge USTP locker unlock code for ${params.stationName} (${params.stationCode}), ${params.compartmentLabel} (${params.pricingTier}) is ready.`,
-    `Duration: ${params.durationMinutes} minutes · Fee: PHP ${params.totalFee}`,
+    `Duration: ${params.durationMinutes} minutes · Fee: PHP ${params.totalFee}${isCoinPayment ? ' (Pay via Kiosk Coin Slot)' : ''}`,
     `6-Digit Backup Code: ${params.pinCode}`,
     `Pass ID: ${params.tokenId}`,
     '',
-    `Hold the attached QR code in front of the ${params.stationName} kiosk camera after tapping "Scan QR" (or enter the 6-digit backup code).`,
+    isCoinPayment
+      ? `Hold the attached QR code in front of the ${params.stationName} kiosk camera after tapping "Scan QR" (or enter the 6-digit backup code), then insert PHP ${params.totalFee} in coins when prompted to unlatch.`
+      : `Hold the attached QR code in front of the ${params.stationName} kiosk camera after tapping "Scan QR" (or enter the 6-digit backup code).`,
     `Valid for ${expiresMins} minutes (single use).`,
   ].join('\n');
 
@@ -341,6 +345,11 @@ export async function sendLockerQrUnlockEmail(params: {
         <p style="margin: 0 0 16px; color: #64748B; font-size: 14px;">Hi ${safeName},</p>
         <p style="margin: 0 0 18px; color: #334155; font-size: 14px; line-height: 1.5;">
           Tap <strong>Scan QR</strong> on the <strong>${safeStation}</strong> (${safeCode}) kiosk and hold this QR code up to the camera to unlock <strong>${safeCompartment}</strong> (${safeTier}, ${params.durationMinutes} min).
+          ${
+            isCoinPayment
+              ? `<br /><strong style="color: #0F766E;">Coin Slot Payment:</strong> Insert <strong>PHP ${params.totalFee}.00</strong> in coins into the kiosk coin slot when prompted after scanning.`
+              : ''
+          }
         </p>
         <div style="background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 18px; text-align: center; margin: 0 0 18px;">
           <img src="cid:unicharge-qr-pass" alt="UniCharge Kiosk QR Code" width="220" height="220" style="display: block; margin: 0 auto 14px; border-radius: 8px; background: #FFFFFF;" />

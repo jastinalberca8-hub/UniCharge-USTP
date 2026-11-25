@@ -1640,7 +1640,6 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
       .filter((r) => r.status === 'active')
       .map((r) => {
         const owner = r.userUid ? userByUid.get(r.userUid) : undefined;
-        const isWalkIn = !r.userUid || !owner;
         const resolvedMethod =
           r.paymentMethod === 'cash' || r.qrVerificationCode?.includes('|COIN-')
             ? 'cash'
@@ -1652,8 +1651,8 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
           id: r.sessionId,
           kind: 'active',
           userUid: r.userUid ?? null,
-          userName: isWalkIn ? 'Walk-In Coin User' : owner.name,
-          studentIdNumber: isWalkIn ? '' : owner.studentIdNumber,
+          userName: owner?.name || 'USTP Student',
+          studentIdNumber: owner?.studentIdNumber || '—',
           slotNumber: r.slotNumber,
           serviceType: normalizeServiceType(r.serviceType, r.slotNumber),
           pricingTier: resolvePricingTier({
@@ -1694,7 +1693,6 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
     const completedAndActiveTransactions: AdminStationTransaction[] = recentSessionRows.map(
       (r) => {
         const owner = r.userUid ? userByUid.get(r.userUid) : undefined;
-        const isWalkIn = !r.userUid || !owner;
         const resolvedMethod =
           r.paymentMethod === 'cash' || r.qrVerificationCode?.includes('|COIN-')
             ? 'cash'
@@ -1706,8 +1704,8 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
           id: r.sessionId,
           kind: r.status === 'active' ? 'active' : 'completed',
           userUid: r.userUid ?? null,
-          userName: isWalkIn ? 'Walk-In Coin User' : owner.name,
-          studentIdNumber: isWalkIn ? '' : owner.studentIdNumber,
+          userName: owner?.name || 'USTP Student',
+          studentIdNumber: owner?.studentIdNumber || '—',
           slotNumber: r.slotNumber,
           serviceType: normalizeServiceType(r.serviceType, r.slotNumber),
           pricingTier: resolvePricingTier({
@@ -1945,12 +1943,6 @@ export async function createUnlockTokenDb(params: {
   if (actor.role === 'admin') {
     throw new AuthValidationError(
       'Admin accounts cannot avail student compartments. Kiosk locker booking is restricted to students.'
-    );
-  }
-
-  if (validPayment === 'cash') {
-    throw new AuthValidationError(
-      'Online locker bookings accept e-payments only (Campus E-Wallet, GCash, Maya, or GoTyme Bank). Use the kiosk coin slot inside Kiosk Scanner for coin payments.'
     );
   }
 
@@ -2293,12 +2285,9 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
 
     const matchedActiveSession = activeSessionRows.find((row) => {
       const code = row.qrVerificationCode || '';
-      const isCoinWalkUpSession = code.includes('|COIN-');
       const isAuthorizedForRow = actor
-        ? actor.role === 'admin' ||
-          row.userUid === actor.uid ||
-          (isSixDigitPin && isCoinWalkUpSession)
-        : row.userUid === null && isSixDigitPin && isCoinWalkUpSession;
+        ? actor.role === 'admin' || row.userUid === actor.uid
+        : false;
 
       if (!isAuthorizedForRow) return false;
       if (isSixDigitPin) {
@@ -2349,7 +2338,7 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
     throw new AuthValidationError(
       actor
         ? 'Invalid QR code or 6-digit PIN. Hold your active UniCharge QR directly to the camera or check your email pass.'
-        : 'Invalid 6-digit Walk-In PIN, or sign in to redeem an E-Wallet account QR/PIN.'
+        : 'Please sign in to your UniCharge student account before scanning or entering a PIN.'
     );
   }
 
@@ -2694,18 +2683,20 @@ export async function coinWalkUpUnlockDb(params: {
   await ensureCatalogSeeded();
   await releaseExpiredReservationsDb();
 
-  let actor: typeof users.$inferSelect | null = null;
-  if (params.uid) {
-    const actorRows = await db.select().from(users).where(eq(users.uid, params.uid));
-    actor = actorRows[0] ?? null;
-    if (!actor) {
-      throw new AuthValidationError('Authenticated account not found.');
-    }
-    if (actor.role === 'admin') {
-      throw new AuthValidationError(
-        'Admin accounts cannot use the student kiosk terminal. Kiosk rentals are for students and walk-in users only.'
-      );
-    }
+  if (!params.uid) {
+    throw new AuthValidationError(
+      'Please sign in to your UniCharge student account before using the kiosk.'
+    );
+  }
+  const actorRows = await db.select().from(users).where(eq(users.uid, params.uid));
+  const actor = actorRows[0] ?? null;
+  if (!actor) {
+    throw new AuthValidationError('Authenticated account not found.');
+  }
+  if (actor.role === 'admin') {
+    throw new AuthValidationError(
+      'Admin accounts cannot use the student kiosk terminal. Kiosk rentals are for students only.'
+    );
   }
 
   const targetStationId = params.stationId?.trim() || UNICHARGE_STATION_ID;
@@ -2989,8 +2980,8 @@ export async function coinWalkUpUnlockDb(params: {
 
   return {
     user: result.updatedOwner ? mapUserRow(result.updatedOwner) : null,
-    ownerUid: actor ? actor.uid : null,
-    ownerName: actor ? actor.name : 'Walk-In Coin User',
+    ownerUid: actor.uid,
+    ownerName: actor.name,
     session: result.newSession,
     stations: updatedStations,
     walletTransactions: walletTxList,

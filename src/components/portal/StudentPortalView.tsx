@@ -159,7 +159,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
     markNotificationRead,
   } = useUniCharge();
 
-  const [paymentMethod, setPaymentMethod] = useState<'wallet' | OnlineEpaymentPlatform>('wallet');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('wallet');
   const [selectedTopUpPlatform, setSelectedTopUpPlatform] =
     useState<OnlineEpaymentPlatform>('gcash');
   const [customTopUpAmount, setCustomTopUpAmount] = useState<string>('150');
@@ -249,7 +249,11 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
       return;
     }
 
-    if (paymentMethod !== 'wallet') {
+    if (
+      paymentMethod === 'gcash' ||
+      paymentMethod === 'maya' ||
+      paymentMethod === 'gotyme'
+    ) {
       if (!activeCompartment) {
         setBookingMessage({
           type: 'error',
@@ -271,7 +275,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
     setIsGeneratingQr(true);
     setResendStatusMessage(null);
     try {
-      const res = await generateUnlockToken('wallet');
+      const res = await generateUnlockToken(paymentMethod);
       if (res.success) {
         setBookingMessage({ type: 'success', text: res.message });
         setShowQrModal(true);
@@ -901,6 +905,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                 <div>
                   <span className="text-xs font-bold text-[#1E293B] block">
                     Pending Kiosk Scan · {formatCompartmentLabel(pendingUnlockToken.slotNumber)} ({pendingUnlockToken.pricingTier})
+                    {pendingUnlockToken.paymentMethod === 'cash'
+                      ? ` · Insert ₱${pendingUnlockToken.totalFee.toFixed(2)} Coins at Kiosk`
+                      : ''}
                   </span>
                   <span className="text-xs text-[#64748B]">
                     PIN <strong className="font-mono text-[#1E293B]">{pendingUnlockToken.pinCode}</strong> ·{' '}
@@ -1086,9 +1093,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               </div>
             </div>
 
-            {/* Summary & Online E-Payment Column */}
+            {/* Summary & Payment Column */}
             <div className="lg:col-span-5 bg-[#FFFFFF] p-6 rounded-2xl border border-[#E2E8F0] space-y-4">
-              <h3 className="text-base font-bold text-[#4E6E81]">Online E-Payment &amp; Solenoid Release</h3>
+              <h3 className="text-base font-bold text-[#4E6E81]">Payment &amp; Solenoid Release</h3>
               <div className="space-y-2 text-xs border-b border-[#E2E8F0] pb-4">
                 <div className="flex justify-between">
                   <span className="text-[#64748B]">Station</span>
@@ -1121,10 +1128,10 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="block text-xs font-semibold text-[#1E293B]">
-                    Online E-Payment Method
+                    Payment Method
                   </label>
                   <span className="text-[10px] font-medium text-[#64748B]">
-                    Coins: Walk-In Kiosk Only
+                    E-Payment or Kiosk Coin Slot
                   </span>
                 </div>
                 {(
@@ -1148,6 +1155,11 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                       id: 'gotyme' as const,
                       label: 'GoTyme Bank',
                       subtitle: `Simulated GoTyme online transfer checkout (₱${totalFee}.00)`,
+                    },
+                    {
+                      id: 'cash' as const,
+                      label: `Kiosk Coin Slot (₱${totalFee}.00)`,
+                      subtitle: `Generate & email QR pass now · scan at kiosk & insert ₱${totalFee}.00 coins to unlatch`,
                     },
                   ]
                 ).map((pm) => (
@@ -1197,6 +1209,8 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                     ? 'Generating & Emailing QR Pass...'
                     : paymentMethod === 'wallet'
                     ? `Authorize & Generate Unlock QR (₱${totalFee})`
+                    : paymentMethod === 'cash'
+                    ? `Generate Unlock QR · Pay Coin at Kiosk (₱${totalFee})`
                     : `Pay via ${formatPaymentMethodLabel(paymentMethod)} (₱${totalFee})`}
                 </span>
               </button>
@@ -1620,7 +1634,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
           <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-5 space-y-3">
             <div className="flex items-center gap-2 text-xs font-bold text-[#4E6E81] uppercase tracking-wider">
               <Wallet className="w-4 h-4 text-[#5BC496]" />
-              <span>How Online E-Payments &amp; Walk-In Coins Work</span>
+              <span>How Online E-Payments &amp; Kiosk Coins Work</span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs text-[#64748B]">
               <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
@@ -1632,8 +1646,8 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                 Pay per locker booking directly with GCash, Maya, or GoTyme Bank inside Avail a Locker.
               </div>
               <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
-                <span className="font-bold text-[#1E293B] block mb-1">3. Walk-In Coins</span>
-                Physical coins (₱1/₱5/₱10/₱20) work directly at the kiosk touchscreen with no account needed.
+                <span className="font-bold text-[#1E293B] block mb-1">3. Kiosk Coin Slot</span>
+                Select Kiosk Coin Slot in Avail a Locker, scan your QR/PIN at the kiosk, then insert ₱1/₱5/₱10/₱20 coins when prompted.
               </div>
             </div>
           </div>
@@ -1863,10 +1877,10 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               </div>
               <div className="space-y-2 text-xs text-[#64748B] leading-relaxed">
                 <p>
-                  <strong className="text-[#1E293B]">Online Booking:</strong> Choose a compartment &amp; tier in Avail a Locker, pay via Campus E-Wallet, GCash, Maya, or GoTyme Bank, then scan the QR or enter the 6-digit PIN at the station within 5 minutes.
+                  <strong className="text-[#1E293B]">QR Booking &amp; Payment:</strong> Choose a compartment &amp; tier in Avail a Locker, pick Campus E-Wallet, GCash, Maya, GoTyme Bank, or Kiosk Coin Slot, then scan the QR (or emailed PNG / 6-digit PIN) at the kiosk within 5 minutes.
                 </p>
                 <p>
-                  <strong className="text-[#1E293B]">Dead-Phone Walk-In:</strong> Tap Walk-Up Coin directly on the kiosk screen, pick a free compartment, choose your own 6-digit PIN, and insert coins—no phone or login required.
+                  <strong className="text-[#1E293B]">Kiosk Coin Slot:</strong> After scanning your Coin Slot QR or PIN at the kiosk, the LED screen will prompt you to insert the required ₱1/₱5/₱10/₱20 coins to unlatch your compartment.
                 </p>
                 <p>
                   <strong className="text-[#1E293B]">1 Locker Limit:</strong> Retrieve your device and end your active session before availing a new compartment.

@@ -1336,14 +1336,6 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       };
     }
 
-    if (paymentMethod === 'cash') {
-      return {
-        success: false,
-        message:
-          'Signed-in bookings accept online e-payments only (Campus E-Wallet, GCash, Maya, or GoTyme Bank).',
-      };
-    }
-
     const slotToBook =
       (selectedSlot &&
       selectedSlot.status === 'available' &&
@@ -1924,7 +1916,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     if (currentUser?.role === 'admin') {
       return {
         success: false,
-        message: 'Admin accounts cannot avail kiosk compartments. Kiosk self-service is restricted to students and walk-in users.',
+        message: 'Admin accounts cannot avail kiosk compartments. Kiosk self-service is restricted to students.',
       };
     }
     if (activeSession && activeSession.status === 'active') {

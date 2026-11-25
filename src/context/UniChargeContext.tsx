@@ -382,6 +382,8 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [liveToastNotifications, setLiveToastNotifications] = useState<DashboardNotification[]>([]);
   const [firestoreError, setFirestoreError] = useState<string | null>(null);
   const notifiedChargeSessionsRef = useRef<Set<string>>(new Set());
+  const databaseNotificationUserUidRef = useRef<string | null>(null);
+  const databaseNotificationIdsRef = useRef<Set<string>>(new Set());
 
   // Auth token held strictly in memory (never localStorage)
   const idTokenRef = useRef<string | null>(null);
@@ -613,6 +615,55 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       if (Array.isArray(data.securityAlerts)) {
         setSecurityAlerts(data.securityAlerts as SecurityAlert[]);
       }
+      if (Array.isArray(data.notifications) && typeof data.user?.id === 'string') {
+        const notificationUserUid = data.user.id as string;
+        const incomingNotifications = (data.notifications as DashboardNotification[]).map(
+          (notification) => ({ ...notification, source: 'database' as const })
+        );
+        let newlyAddedUnread: DashboardNotification[] = [];
+        if (databaseNotificationUserUidRef.current !== notificationUserUid) {
+          databaseNotificationUserUidRef.current = notificationUserUid;
+          databaseNotificationIdsRef.current = new Set(
+            incomingNotifications.map((notification) => notification.id)
+          );
+          newlyAddedUnread = incomingNotifications.filter(
+            (notification) => !notification.read
+          );
+        } else {
+          newlyAddedUnread = incomingNotifications.filter(
+            (notification) =>
+              !notification.read &&
+              !databaseNotificationIdsRef.current.has(notification.id)
+          );
+          incomingNotifications.forEach((notification) =>
+            databaseNotificationIdsRef.current.add(notification.id)
+          );
+        }
+        if (newlyAddedUnread.length > 0) {
+          if (
+            newlyAddedUnread.some(
+              (notification) => notification.type === 'unexpected_door_open'
+            )
+          ) {
+            sound.playTamperAlarm();
+          } else {
+            sound.playChargingConnected();
+          }
+          setLiveToastNotifications((prev) => {
+            const existingIds = new Set(prev.map((notification) => notification.id));
+            const additions = newlyAddedUnread.filter(
+              (notification) => !existingIds.has(notification.id)
+            );
+            return [...additions, ...prev].slice(0, 4);
+          });
+        }
+        setNotifications((prev) =>
+          [
+            ...incomingNotifications,
+            ...prev.filter((notification) => notification.source !== 'database'),
+          ].sort((a, b) => b.createdAtMs - a.createdAtMs)
+        );
+      }
       if (data.stationActivity) {
         setAdminStationActivity(data.stationActivity as AdminStationActivity);
       }
@@ -763,7 +814,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setFirestoreError(null);
     const unsubscribe = subscribeUserNotifications(firebaseAuthUser.uid, {
       onSnapshotData: (allItems, newlyAddedUnread) => {
-        setNotifications(allItems);
+        setNotifications((prev) =>
+          [
+            ...allItems,
+            ...prev.filter((notification) => notification.source !== 'firestore'),
+          ].sort((a, b) => b.createdAtMs - a.createdAtMs)
+        );
         if (newlyAddedUnread.length > 0) {
           const latestCritical = newlyAddedUnread.some(
             (item) => item.type === 'unexpected_door_open'
@@ -1415,6 +1471,8 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setNotifications([]);
     setLiveToastNotifications([]);
     setFirestoreError(null);
+    databaseNotificationUserUidRef.current = null;
+    databaseNotificationIdsRef.current.clear();
     setFirebaseAuthUser(null);
     notifiedChargeSessionsRef.current.clear();
     idTokenRef.current = null;
@@ -2723,6 +2781,25 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       const hasExternalRecipient = Boolean(
         input.targetUserUid && input.targetUserUid !== currentUser?.id
       );
+      if (
+        hasExternalRecipient &&
+        input.type === 'unexpected_door_open' &&
+        isBackendSessionRef.current
+      ) {
+        try {
+          const response = await authorizedFetch(
+            '/api/admin/sessions/simulate-door-open',
+            {
+              method: 'POST',
+              body: JSON.stringify({ sessionId: input.sessionId }),
+            }
+          );
+          return response?.ok === true;
+        } catch (error) {
+          console.error('Failed to deliver targeted session alert:', error);
+          return false;
+        }
+      }
       if (isFirestoreLive) {
         try {
           const wrote = await createFirestoreNotification(input);
@@ -2768,7 +2845,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       });
       return true;
     },
-    [currentUser?.id, isFirestoreLive]
+    [authorizedFetch, currentUser?.id, isFirestoreLive]
   );
 
   // Automatic real-time Firestore alert when active session reaches 100% battery
@@ -2803,11 +2880,20 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const markNotificationRead = useCallback(
     async (id: string) => {
+      const notification = notifications.find((item) => item.id === id);
       setLiveToastNotifications((prev) => prev.filter((item) => item.id !== id));
       setNotifications((prev) =>
         prev.map((item) => (item.id === id ? { ...item, read: true } : item))
       );
-      if (isFirestoreLive) {
+      if (notification?.source === 'database') {
+        try {
+          await authorizedFetch(`/api/notifications/${encodeURIComponent(id)}/read`, {
+            method: 'POST',
+          });
+        } catch (error) {
+          console.error('Mark database notification read failed:', error);
+        }
+      } else if (isFirestoreLive && notification?.source === 'firestore') {
         try {
           await markFirestoreNotificationRead(id);
         } catch (err) {
@@ -2815,23 +2901,48 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         }
       }
     },
-    [isFirestoreLive]
+    [authorizedFetch, isFirestoreLive, notifications]
   );
 
   const markAllNotificationsRead = useCallback(async () => {
     const unread = notifications.filter((n) => !n.read);
     setLiveToastNotifications([]);
     setNotifications((prev) => prev.map((item) => ({ ...item, read: true })));
-    if (isFirestoreLive && unread.length > 0) {
-      await Promise.allSettled(unread.map((item) => markFirestoreNotificationRead(item.id)));
+    if (unread.length > 0) {
+      const persistReads = unread.map((item) => {
+        if (item.source === 'database') {
+          return authorizedFetch(`/api/notifications/${encodeURIComponent(item.id)}/read`, {
+            method: 'POST',
+          });
+        }
+        if (isFirestoreLive && item.source === 'firestore') {
+          return markFirestoreNotificationRead(item.id);
+        }
+        return Promise.resolve();
+      });
+      const results = await Promise.allSettled(persistReads);
+      results.forEach((result) => {
+        if (result.status === 'rejected') {
+          console.error('Mark all notifications read failed:', result.reason);
+        }
+      });
     }
-  }, [isFirestoreLive, notifications]);
+  }, [authorizedFetch, isFirestoreLive, notifications]);
 
   const deleteNotification = useCallback(
     async (id: string) => {
+      const notification = notifications.find((item) => item.id === id);
       setLiveToastNotifications((prev) => prev.filter((item) => item.id !== id));
       setNotifications((prev) => prev.filter((item) => item.id !== id));
-      if (isFirestoreLive) {
+      if (notification?.source === 'database') {
+        try {
+          await authorizedFetch(`/api/notifications/${encodeURIComponent(id)}`, {
+            method: 'DELETE',
+          });
+        } catch (error) {
+          console.error('Delete database notification failed:', error);
+        }
+      } else if (isFirestoreLive && notification?.source === 'firestore') {
         try {
           await deleteFirestoreNotification(id);
         } catch (err) {
@@ -2839,7 +2950,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         }
       }
     },
-    [isFirestoreLive]
+    [authorizedFetch, isFirestoreLive, notifications]
   );
 
   const triggerUnexpectedDoorOpen = async (

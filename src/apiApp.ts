@@ -10,6 +10,7 @@ import {
   AuthConflictError,
   AuthCredentialsError,
   AuthValidationError,
+  adminCreateSessionDoorNotificationDb,
   adminProvisionStaffDb,
   adminResolveAlertDb,
   adminSimulateSessionFullChargeDb,
@@ -20,11 +21,13 @@ import {
   completeGoogleOnboardingDb,
   createEmailVerificationDb,
   createUnlockTokenDb,
+  deleteUserNotificationDb,
   endSessionDb,
   getBootstrapData,
   getPublicStationStateDb,
   getStationSyncStateDb,
   getUnlockTokenByIdDb,
+  markUserNotificationReadDb,
   recordTamperAlertDb,
   registerStudentUserDb,
   requestPasswordResetDb,
@@ -693,6 +696,66 @@ apiApp.post('/api/admin/sessions/simulate-full-charge', requireAuth, async (req:
   }
 });
 
+apiApp.post('/api/admin/sessions/simulate-door-open', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const uid = req.user!.uid;
+    const email = req.user!.email || '';
+    const bootstrap = await getBootstrapData(uid, email);
+    if (bootstrap.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: Admin access required' });
+    }
+
+    const sessionId =
+      typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+    if (!sessionId) {
+      return res.status(400).json({ error: 'A session ID is required.' });
+    }
+
+    const notification = await adminCreateSessionDoorNotificationDb(sessionId);
+    res.json({ ok: true, notification });
+  } catch (error: unknown) {
+    if (error instanceof AuthValidationError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    const message = error instanceof Error ? error.message : 'Failed to notify session owner.';
+    console.error('Admin door-open notification error:', error);
+    res.status(500).json({ error: message });
+  }
+});
+
+apiApp.post('/api/notifications/:notificationId/read', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const updated = await markUserNotificationReadDb(
+      req.user!.uid,
+      String(req.params.notificationId || '')
+    );
+    if (!updated) {
+      return res.status(404).json({ error: 'Notification not found.' });
+    }
+    res.json({ ok: true });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Failed to mark notification as read.';
+    console.error('Mark notification read route error:', error);
+    res.status(500).json({ error: message });
+  }
+});
+
+apiApp.delete('/api/notifications/:notificationId', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const deleted = await deleteUserNotificationDb(
+      req.user!.uid,
+      String(req.params.notificationId || '')
+    );
+    if (!deleted) {
+      return res.status(404).json({ error: 'Notification not found.' });
+    }
+    res.json({ ok: true });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Failed to delete notification.';
+    console.error('Delete notification route error:', error);
+    res.status(500).json({ error: message });
+  }
+});
 
 apiApp.post('/api/admin/alerts/resolve', requireAuth, async (req: AuthRequest, res) => {
   try {

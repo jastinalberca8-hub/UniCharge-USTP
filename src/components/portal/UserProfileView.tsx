@@ -202,7 +202,7 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({ onBackToDashbo
 
             <h2 className="text-lg font-bold text-[#1E293B] mt-3">{currentUser.name}</h2>
             <span className="text-xs font-mono font-semibold text-[#4E6E81]">
-              {currentUser.studentIdNumber}
+              {isAdmin ? 'ADMIN' : currentUser.studentIdNumber}
             </span>
             <p className="text-xs text-[#64748B] mt-1">{currentUser.degree}</p>
             {currentUser.college && (
@@ -306,7 +306,7 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({ onBackToDashbo
                   <IdCard className="w-4 h-4 text-[#64748B] absolute left-3 top-3" />
                   <input
                     type="text"
-                    value={currentUser.studentIdNumber}
+                    value={isAdmin ? 'ADMIN' : currentUser.studentIdNumber}
                     disabled
                     className="w-full h-10 pl-9 pr-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-sm font-mono text-[#64748B] cursor-not-allowed"
                   />

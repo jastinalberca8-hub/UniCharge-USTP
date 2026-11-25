@@ -9,6 +9,7 @@ import {
   sessions,
   stations,
   users,
+  userNotifications,
   walletTransactions,
 } from './schema.ts';
 import { SEED_SECURITY_ALERTS, SEED_STATIONS } from './seedData.ts';
@@ -39,6 +40,7 @@ import type {
   ActiveSession,
   AdminStationActivity,
   AdminStationTransaction,
+  DashboardNotification,
   KioskStation,
   LockerSlot,
   LockerStatus,
@@ -230,6 +232,25 @@ async function ensureSchemaReady(): Promise<void> {
       resolved BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS user_notifications (
+      id TEXT PRIMARY KEY,
+      user_uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+      session_id TEXT NOT NULL,
+      station_id TEXT NOT NULL,
+      station_code TEXT NOT NULL,
+      station_name TEXT NOT NULL,
+      slot_number INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      title TEXT NOT NULL,
+      message TEXT NOT NULL,
+      read BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS user_notifications_user_created_at_idx
+      ON user_notifications (user_uid, created_at);
   `);
 }
 
@@ -270,7 +291,7 @@ const DEFAULT_DB_ACCOUNTS = [
   {
     uid: REANOZA_ADMIN_UID,
     name: 'Reanoza Marilex Basañes Rabosa',
-    studentIdNumber: 'ADMIN-05',
+    studentIdNumber: 'ADMIN',
     email: 'reanoza.ustp.ph',
     passwordPlain: 'reanoza123',
     role: 'admin',
@@ -1834,6 +1855,119 @@ export async function adminSimulateSessionFullChargeDb(
   return fetchAdminStationActivityDb();
 }
 
+function mapUserNotificationRow(
+  row: typeof userNotifications.$inferSelect
+): DashboardNotification {
+  return {
+    id: row.id,
+    userUid: row.userUid,
+    sessionId: row.sessionId,
+    stationId: row.stationId,
+    stationCode: row.stationCode,
+    stationName: row.stationName,
+    slotNumber: row.slotNumber,
+    type: row.type === 'charge_complete' ? 'charge_complete' : 'unexpected_door_open',
+    severity: row.severity === 'critical' ? 'critical' : 'info',
+    title: row.title,
+    message: row.message,
+    read: row.read,
+    createdAtMs: row.createdAt.getTime(),
+    source: 'database',
+  };
+}
+
+export async function adminCreateSessionDoorNotificationDb(
+  sessionId: string
+): Promise<DashboardNotification> {
+  await ensureCatalogSeeded();
+  const [session] = await db
+    .select({
+      sessionId: sessions.sessionId,
+      userUid: sessions.userUid,
+      stationId: sessions.stationId,
+      stationName: sessions.stationName,
+      stationCode: stations.campusCode,
+      slotNumber: sessions.slotNumber,
+    })
+    .from(sessions)
+    .leftJoin(stations, eq(stations.id, sessions.stationId))
+    .where(and(eq(sessions.sessionId, sessionId), eq(sessions.status, 'active')))
+    .limit(1);
+
+  if (!session?.userUid) {
+    throw new AuthValidationError('The selected active session could not be found.');
+  }
+
+  const stationName = session.stationName || UNICHARGE_STATION_NAME;
+  const notificationId = `door_${crypto.randomBytes(16).toString('hex')}`;
+  const [notification] = await db
+    .insert(userNotifications)
+    .values({
+      id: notificationId,
+      userUid: session.userUid,
+      sessionId: session.sessionId,
+      stationId: session.stationId,
+      stationCode: session.stationCode || UNICHARGE_STATION_CODE,
+      stationName,
+      slotNumber: session.slotNumber,
+      type: 'unexpected_door_open',
+      severity: 'critical',
+      title: 'Locker Door Opened Unexpectedly!',
+      message: `${formatCompartmentLabel(session.slotNumber)} at ${stationName} unlatched without authorization. Check your device or tap Kiosk Scanner immediately.`,
+    })
+    .returning();
+
+  return mapUserNotificationRow(notification);
+}
+
+export async function getUserNotificationsDb(
+  userUid: string
+): Promise<DashboardNotification[]> {
+  await ensureCatalogSeeded();
+  const rows = await db
+    .select()
+    .from(userNotifications)
+    .where(eq(userNotifications.userUid, userUid))
+    .orderBy(desc(userNotifications.createdAt))
+    .limit(100);
+  return rows.map(mapUserNotificationRow);
+}
+
+export async function markUserNotificationReadDb(
+  userUid: string,
+  notificationId: string
+): Promise<boolean> {
+  await ensureCatalogSeeded();
+  const [updated] = await db
+    .update(userNotifications)
+    .set({ read: true })
+    .where(
+      and(
+        eq(userNotifications.userUid, userUid),
+        eq(userNotifications.id, notificationId)
+      )
+    )
+    .returning({ id: userNotifications.id });
+  return Boolean(updated);
+}
+
+export async function deleteUserNotificationDb(
+  userUid: string,
+  notificationId: string
+): Promise<boolean> {
+  await ensureCatalogSeeded();
+  const [deleted] = await db
+    .delete(userNotifications)
+    .where(
+      and(
+        eq(userNotifications.userUid, userUid),
+        eq(userNotifications.id, notificationId)
+      )
+    )
+    .returning({ id: userNotifications.id });
+  return Boolean(deleted);
+}
+
 export async function getBootstrapData(
   uid: string,
   email: string,
@@ -1898,12 +2032,14 @@ export async function getStationSyncStateDb(uid: string, email: string) {
     ? mapUserRow(existingRows[0])
     : await getOrCreateUser(uid, email);
 
-  const [stationList, alertList, userSessions, walletTxList] = await Promise.all([
-    fetchStationsWithSlots(),
-    fetchSecurityAlerts(),
-    fetchUserSessionState(actor.id),
-    fetchWalletTransactionsDb(actor.id),
-  ]);
+  const [stationList, alertList, userSessions, walletTxList, notificationList] =
+    await Promise.all([
+      fetchStationsWithSlots(),
+      fetchSecurityAlerts(),
+      fetchUserSessionState(actor.id),
+      fetchWalletTransactionsDb(actor.id),
+      getUserNotificationsDb(actor.id),
+    ]);
 
   let allUsers: UserAccount[] | undefined;
   let stationActivity: AdminStationActivity | undefined;
@@ -1936,6 +2072,7 @@ export async function getStationSyncStateDb(uid: string, email: string) {
     activeSession: userSessions.activeSession,
     sessionHistory: userSessions.history,
     walletTransactions: walletTxList,
+    notifications: notificationList,
     pendingUnlockToken: pendingRows[0] ? mapUnlockTokenRow(pendingRows[0]) : null,
     ...(allUsers ? { users: allUsers } : {}),
     ...(stationActivity ? { stationActivity } : {}),

@@ -2,6 +2,7 @@ import { relations } from 'drizzle-orm';
 import {
   boolean,
   doublePrecision,
+  index,
   integer,
   pgTable,
   serial,
@@ -138,6 +139,29 @@ export const securityAlerts = pgTable('security_alerts', {
   resolved: boolean('resolved').notNull().default(false),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+export const userNotifications = pgTable('user_notifications', {
+  id: text('id').primaryKey(),
+  userUid: text('user_uid')
+    .references(() => users.uid)
+    .notNull(),
+  sessionId: text('session_id').notNull(),
+  stationId: text('station_id').notNull(),
+  stationCode: text('station_code').notNull(),
+  stationName: text('station_name').notNull(),
+  slotNumber: integer('slot_number').notNull(),
+  type: text('type').notNull(),
+  severity: text('severity').notNull(),
+  title: text('title').notNull(),
+  message: text('message').notNull(),
+  read: boolean('read').notNull().default(false),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  userCreatedAtIdx: index('user_notifications_user_created_at_idx').on(
+    table.userUid,
+    table.createdAt
+  ),
+}));
 
 export const walletTransactions = pgTable('wallet_transactions', {
   id: serial('id').primaryKey(),

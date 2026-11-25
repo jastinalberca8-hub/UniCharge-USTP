@@ -198,7 +198,7 @@ export interface DashboardNotification {
   message: string;
   read: boolean;
   createdAtMs: number;
-  source?: 'firestore' | 'local';
+  source?: 'firestore' | 'database' | 'local';
 }
 
 export interface AdminStationTransaction {

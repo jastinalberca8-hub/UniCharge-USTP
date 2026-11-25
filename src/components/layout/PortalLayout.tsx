@@ -455,7 +455,7 @@ export const PortalLayout: React.FC = () => {
                 {currentUser.name}
               </span>
               <span className="text-[11px] font-mono text-[#64748B] block">
-                {currentUser.studentIdNumber}
+                {currentUser.role === 'admin' ? 'ADMIN' : currentUser.studentIdNumber}
               </span>
             </div>
             <ChevronRight className="hidden md:block w-3.5 h-3.5 text-[#64748B]" />

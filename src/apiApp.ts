@@ -384,6 +384,7 @@ apiApp.post('/api/kiosk/unlock-tokens', requireAuth, async (req: AuthRequest, re
         totalFee: token.totalFee,
         paymentMethod: token.paymentMethod,
         pinCode: token.pinCode,
+        qrPayload: token.qrPayload,
         tokenId: token.tokenId,
         expiresInMinutes: 5,
       });
@@ -446,6 +447,7 @@ apiApp.post('/api/kiosk/email-unlock-pin', requireAuth, async (req: AuthRequest,
       totalFee: token.totalFee,
       paymentMethod: token.paymentMethod,
       pinCode: token.pinCode,
+      qrPayload: token.qrPayload,
       tokenId: token.tokenId,
       expiresInMinutes: 5,
     });

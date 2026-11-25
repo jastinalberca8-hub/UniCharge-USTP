@@ -1585,7 +1585,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         notifyStationSync();
 
         const emailSuffix = serverToken.emailSent
-          ? ` Backup PIN emailed to ${serverToken.emailSentTo}.`
+          ? ` QR pass and backup PIN emailed to ${serverToken.emailSentTo}.`
           : '';
         return {
           success: true,
@@ -1709,7 +1709,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       );
       return {
         success: true,
-        message: `Backup PIN sent to ${data.emailSentTo}${data.emailSentFrom ? ` from ${data.emailSentFrom}` : ''}.`,
+        message: `QR pass and backup PIN sent to ${data.emailSentTo}${data.emailSentFrom ? ` from ${data.emailSentFrom}` : ''}.`,
         emailSentTo: data.emailSentTo,
         emailSentFrom: data.emailSentFrom,
         deliveryMode: data.deliveryMode,

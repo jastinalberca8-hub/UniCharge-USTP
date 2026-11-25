@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import QRCode from 'qrcode';
 
 export interface EmailSendResult {
   deliveryMode: 'resend' | 'smtp' | 'ethereal';
@@ -116,6 +117,7 @@ async function sendWithResend(params: {
             attachments: attachments.map((att) => ({
               filename: att.filename,
               content: att.content.toString('base64'),
+              content_type: att.contentType,
               ...(att.cid ? { content_id: att.cid } : {}),
             })),
           }
@@ -329,9 +331,17 @@ export async function sendLockerUnlockPinEmail(params: {
   totalFee: number;
   paymentMethod?: string;
   pinCode: string;
+  qrPayload: string;
   tokenId: string;
   expiresInMinutes?: number;
 }): Promise<EmailSendResult> {
+  const qrImage = await QRCode.toBuffer(params.qrPayload, {
+    type: 'png',
+    errorCorrectionLevel: 'M',
+    width: 320,
+    margin: 4,
+  });
+  const qrCid = 'locker-unlock-qr@unicharge';
   const expiresMins = params.expiresInMinutes ?? 5;
   const safeName = escapeHtml(params.recipientName || 'Student');
   const safeStation = escapeHtml(params.stationName);
@@ -351,7 +361,7 @@ export async function sendLockerUnlockPinEmail(params: {
     `6-Digit Backup Code: ${params.pinCode}`,
     `Pass ID: ${params.tokenId}`,
     '',
-    `At the kiosk, scan the QR pass displayed in your UniCharge portal or enter the 6-digit backup code: ${params.pinCode}.`,
+    `Scan the attached QR pass at the kiosk, or enter the 6-digit backup code: ${params.pinCode}.`,
     ...(isCoinPayment
       ? [`Then insert PHP ${params.totalFee} in coins when prompted to unlatch.`]
       : []),
@@ -364,13 +374,16 @@ export async function sendLockerUnlockPinEmail(params: {
         <h2 style="margin: 0 0 8px; color: #1E293B; font-size: 20px;">UniCharge Kiosk Unlock Details</h2>
         <p style="margin: 0 0 16px; color: #64748B; font-size: 14px;">Hi ${safeName},</p>
         <p style="margin: 0 0 18px; color: #334155; font-size: 14px; line-height: 1.5;">
-          At the <strong>${safeStation}</strong> (${safeCode}) kiosk, scan the QR pass displayed in your UniCharge portal or enter the 6-digit backup code below to unlock <strong>${safeCompartment}</strong> (${safeTier}, ${params.durationMinutes} min).
+          At the <strong>${safeStation}</strong> (${safeCode}) kiosk, scan the QR pass below or enter the 6-digit backup code to unlock <strong>${safeCompartment}</strong> (${safeTier}, ${params.durationMinutes} min).
           ${
             isCoinPayment
               ? `<br /><strong style="color: #0F766E;">Coin Slot Payment:</strong> Insert <strong>PHP ${params.totalFee}.00</strong> in coins into the kiosk coin slot when prompted after scanning.`
               : ''
           }
         </p>
+        <div style="text-align: center; margin: 0 0 18px;">
+          <img src="cid:${qrCid}" alt="Scannable UniCharge locker unlock QR pass" width="240" height="240" style="display: inline-block; width: 240px; height: 240px; image-rendering: pixelated;" />
+        </div>
         <div style="background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 18px; text-align: center; margin: 0 0 18px;">
           <div style="font-size: 11px; color: #64748B; font-weight: 600;">Backup Code</div>
           <div style="font-family: monospace; font-size: 26px; font-weight: 700; letter-spacing: 5px; color: #0F172A; margin-top: 2px;">${safePin}</div>
@@ -387,6 +400,14 @@ export async function sendLockerUnlockPinEmail(params: {
     subject,
     text,
     html,
+    attachments: [
+      {
+        filename: 'unicharge-locker-unlock-qr.png',
+        content: qrImage,
+        contentType: 'image/png',
+        cid: qrCid,
+      },
+    ],
   });
 }
 

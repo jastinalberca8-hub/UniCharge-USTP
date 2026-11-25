@@ -1077,14 +1077,14 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   {activeSession
                     ? 'End Active Session First'
                     : isGeneratingQr
-                    ? 'Generating Pass & Emailing PIN...'
+                    ? 'Generating Pass & Emailing QR & PIN...'
                     : paymentMethod === 'cash'
                     ? `Generate Unlock QR · Pay Coin at Kiosk (₱${totalFee})`
                     : `Pay via ${formatPaymentMethodLabel(paymentMethod)} (₱${totalFee})`}
                 </span>
               </button>
               <p className="text-[11px] text-[#64748B] text-center leading-relaxed">
-                Generates a 5-minute single-use QR pass and backup PIN. The QR stays in this portal; the backup PIN is emailed to {student.email}.
+                Generates a 5-minute single-use QR pass and backup PIN. Both are emailed to {student.email} and shown in this portal.
               </p>
             </div>
           </div>
@@ -1726,7 +1726,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   <Mail className="w-4 h-4 text-[#5BC496] shrink-0 mt-0.5" />
                   <div className="min-w-0">
                     <span className="font-semibold block break-words">
-                      Backup PIN emailed to {pendingUnlockToken.emailSentTo || student.email}
+                      QR pass & backup PIN emailed to {pendingUnlockToken.emailSentTo || student.email}
                     </span>
                     <span className="text-[11px] text-[#64748B] block break-words">
                       {pendingUnlockToken.emailSentFrom
@@ -1751,14 +1751,14 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   onClick={() => void handleEmailUnlockPin()}
                   className="text-[11px] font-bold text-[#4E6E81] hover:text-[#1E293B] underline shrink-0 cursor-pointer disabled:opacity-50"
                 >
-                  {isSendingUnlockPin ? 'Sending...' : 'Resend PIN'}
+                  {isSendingUnlockPin ? 'Sending...' : 'Resend QR & PIN'}
                 </button>
               </div>
             ) : (
               <div className="p-2.5 sm:p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-center justify-between gap-2">
                 <span className="flex-1">
                   {pendingUnlockToken.emailError ||
-                    `Email the 6-digit backup PIN to ${student.email}. The QR remains available in this portal.`}
+                    `Email the QR pass and 6-digit backup PIN to ${student.email}.`}
                 </span>
                 <button
                   type="button"
@@ -1766,7 +1766,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   onClick={() => void handleEmailUnlockPin()}
                   className="px-2.5 py-1 rounded-lg bg-[#4E6E81] text-white text-[11px] font-bold shrink-0 cursor-pointer hover:bg-[#3D5767] disabled:opacity-50"
                 >
-                  {isSendingUnlockPin ? 'Sending...' : 'Email Backup PIN'}
+                  {isSendingUnlockPin ? 'Sending...' : 'Email QR & PIN'}
                 </button>
               </div>
             )}

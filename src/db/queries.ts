@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { and, asc, desc, eq, gt, ilike, inArray, lte, ne, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, ilike, inArray, lte, ne, or, sql } from 'drizzle-orm';
 import { db, pool } from './index.ts';
 import {
   emailVerifications,
@@ -26,7 +26,11 @@ import {
   normalizeServiceType,
   resolvePricingTier,
 } from '../constants/pricing.ts';
-import { RETIRED_DEMO_USER_UID } from '../constants/seededAccounts.ts';
+import {
+  REANOZA_ADMIN_UID,
+  RETIRED_DEMO_USER_UID,
+  RETIRED_SEEDED_ADMIN_UIDS,
+} from '../constants/seededAccounts.ts';
 import {
   formatSessionDateTime,
   getRemainingSessionSeconds,
@@ -55,6 +59,33 @@ const STUDENT_ID_REGEX = /^[A-Za-z0-9-]{4,24}$/;
 
 function hasExactCurrencyAmount(amount: number, expected: number): boolean {
   return Number.isFinite(amount) && Math.round(amount * 100) === Math.round(expected * 100);
+}
+
+function normalizeAccountName(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function normalizeStudentId(value: string): string {
+  return value.trim().replace(/[\s-]+/g, '').toLowerCase();
+}
+
+function normalizedNameColumn() {
+  return sql`lower(regexp_replace(trim(${users.name}), '\\s+', ' ', 'g'))`;
+}
+
+function normalizedStudentIdColumn() {
+  return sql`lower(regexp_replace(trim(${users.studentIdNumber}), '[[:space:]-]+', '', 'g'))`;
+}
+
+async function lockIdentity(tx: { execute: typeof db.execute }, name: string, studentId?: string) {
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(hashtext(${normalizeAccountName(name)}), 1)`
+  );
+  if (studentId) {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtext(${normalizeStudentId(studentId)}), 2)`
+    );
+  }
 }
 
 function hashVerificationCode(code: string): string {
@@ -237,91 +268,11 @@ const DEFAULT_DB_ACCOUNTS = [
     preferredPayment: 'wallet',
   },
   {
-    uid: 'usr_ustp_admin_abigail',
-    name: 'Abigail Lapinid',
-    studentIdNumber: 'ADMIN-01',
-    email: 'abigail.ustp.ph',
-    passwordPlain: 'abigail123',
-    role: 'admin',
-    college: 'USTP ICT Infrastructure & Smart Campus Operations',
-    degree: 'System Administrator',
-    avatar: '',
-    walletBalance: 0.0,
-    biometricEnabled: true,
-    pushNotifications: true,
-    overchargeAlerts: true,
-    preferredPayment: 'wallet',
-  },
-  {
-    uid: 'usr_ustp_admin_andree',
-    name: 'Andree',
-    studentIdNumber: 'ADMIN-02',
-    email: 'andree.ustp.ph',
-    passwordPlain: 'andree123',
-    role: 'admin',
-    college: 'USTP ICT Infrastructure & Smart Campus Operations',
-    degree: 'System Administrator',
-    avatar: '',
-    walletBalance: 0.0,
-    biometricEnabled: true,
-    pushNotifications: true,
-    overchargeAlerts: true,
-    preferredPayment: 'wallet',
-  },
-  {
-    uid: 'usr_ustp_admin_jastin',
-    name: 'Jastin Alberca',
-    studentIdNumber: 'ADMIN-03',
-    email: 'jastin.ustp.ph',
-    passwordPlain: 'jastin123',
-    role: 'admin',
-    college: 'USTP ICT Infrastructure & Smart Campus Operations',
-    degree: 'System Administrator',
-    avatar: '',
-    walletBalance: 0.0,
-    biometricEnabled: true,
-    pushNotifications: true,
-    overchargeAlerts: true,
-    preferredPayment: 'wallet',
-  },
-  {
-    uid: 'usr_ustp_admin_kairos',
-    name: 'Kairos Molo',
-    studentIdNumber: 'ADMIN-04',
-    email: 'kairos.ustp.ph',
-    passwordPlain: 'kairos123',
-    role: 'admin',
-    college: 'USTP ICT Infrastructure & Smart Campus Operations',
-    degree: 'System Administrator',
-    avatar: '',
-    walletBalance: 0.0,
-    biometricEnabled: true,
-    pushNotifications: true,
-    overchargeAlerts: true,
-    preferredPayment: 'wallet',
-  },
-  {
-    uid: 'usr_ustp_admin_reanoza',
+    uid: REANOZA_ADMIN_UID,
     name: 'Reanoza Marilex Basañes Rabosa',
     studentIdNumber: 'ADMIN-05',
     email: 'reanoza.ustp.ph',
     passwordPlain: 'reanoza123',
-    role: 'admin',
-    college: 'USTP ICT Infrastructure & Smart Campus Operations',
-    degree: 'System Administrator',
-    avatar: '',
-    walletBalance: 0.0,
-    biometricEnabled: true,
-    pushNotifications: true,
-    overchargeAlerts: true,
-    preferredPayment: 'wallet',
-  },
-  {
-    uid: 'usr_ustp_admin_tthrystan',
-    name: 'Tthrystan Hortelano',
-    studentIdNumber: 'ADMIN-06',
-    email: 'tthrystan.ustp.ph',
-    passwordPlain: 'tthrystan123',
     role: 'admin',
     college: 'USTP ICT Infrastructure & Smart Campus Operations',
     degree: 'System Administrator',
@@ -481,7 +432,7 @@ export async function ensureCatalogSeeded(): Promise<void> {
           });
       }
 
-      // Remove retired demo accounts and their linked records.
+      // Remove retired accounts and all admins except the designated administrator.
       await db.transaction(async (tx) => {
         const retiredAccounts = await tx
           .select({ uid: users.uid })
@@ -493,7 +444,9 @@ export async function ensureCatalogSeeded(): Promise<void> {
                 'usr_ustp_admin01',
                 'usr_ustp_admin_01',
                 RETIRED_DEMO_USER_UID,
-              ])
+                ...RETIRED_SEEDED_ADMIN_UIDS,
+              ]),
+              and(eq(users.role, 'admin'), ne(users.uid, REANOZA_ADMIN_UID))
             )
           );
         if (retiredAccounts.length === 0) return;
@@ -644,29 +597,66 @@ export async function getOrCreateUser(
     const role: UserRole = 'student';
     const defaultName = displayName?.trim() || cleanEmail.split('@')[0] || 'USTP Student';
 
-    const inserted = await db
-      .insert(users)
-      .values({
-        uid,
-        name: defaultName,
-        studentIdNumber: '',
-        email: cleanEmail,
-        role,
-        college: '',
-        degree: '',
-        avatar: '',
-        walletBalance: 0,
-        biometricEnabled: false,
-        pushNotifications: true,
-        overchargeAlerts: true,
-        preferredPayment: 'wallet',
-        emailVerified: true,
-        profileCompleted: false,
-      })
-      .returning();
+    const inserted = await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${uid}), 3)`);
+      const currentUidRows = await tx
+        .select()
+        .from(users)
+        .where(eq(users.uid, uid))
+        .limit(1);
+      if (currentUidRows[0]) {
+        return currentUidRows[0];
+      }
 
-    return mapUserRow(inserted[0]);
+      await lockIdentity(tx, defaultName);
+      const emailRows = await tx
+        .select()
+        .from(users)
+        .where(ilike(users.email, cleanEmail))
+        .limit(1);
+      if (emailRows[0]) {
+        throw new AuthConflictError('An account with this email already exists.');
+      }
+
+      const duplicateName = await tx
+        .select({ uid: users.uid })
+        .from(users)
+        .where(eq(normalizedNameColumn(), normalizeAccountName(defaultName)))
+        .limit(1);
+      if (duplicateName[0]) {
+        throw new AuthConflictError(
+          'An account with this name already exists. Contact an administrator if this is your account.'
+        );
+      }
+
+      const [created] = await tx
+        .insert(users)
+        .values({
+          uid,
+          name: defaultName,
+          studentIdNumber: '',
+          email: cleanEmail,
+          role,
+          college: '',
+          degree: '',
+          avatar: '',
+          walletBalance: 0,
+          biometricEnabled: false,
+          pushNotifications: true,
+          overchargeAlerts: true,
+          preferredPayment: 'wallet',
+          emailVerified: true,
+          profileCompleted: false,
+        })
+        .returning();
+      return created;
+    });
+
+    return mapUserRow(inserted);
   } catch (error) {
+    if (error instanceof AuthConflictError || error instanceof AuthValidationError) {
+      throw error;
+    }
     console.error('Database user upsert failed:', error);
     throw new Error('Failed to sync user account.', { cause: error });
   }
@@ -730,13 +720,14 @@ export async function createEmailVerificationDb(params: {
       .where(
         or(
           ilike(users.email, cleanEmail),
-          ilike(users.studentIdNumber, cleanId)
+          eq(normalizedStudentIdColumn(), normalizeStudentId(cleanId)),
+          eq(normalizedNameColumn(), normalizeAccountName(cleanName))
         )
       );
 
     if (existing.length > 0) {
       throw new AuthConflictError(
-        'An account with this email or USTP ID already exists.'
+        'An account with this email, name, or USTP ID already exists.'
       );
     }
 
@@ -856,48 +847,53 @@ export async function registerStudentUserDb(params: {
       );
     }
 
-    const existing = await db
-      .select()
-      .from(users)
-      .where(
-        or(
-          ilike(users.email, cleanEmail),
-          ilike(users.studentIdNumber, cleanId)
-        )
-      );
-
-    if (existing.length > 0) {
-      throw new AuthConflictError(
-        'An account with this email or USTP ID already exists.'
-      );
-    }
-
     const uid = `usr_ustp_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
-    const inserted = await db
-      .insert(users)
-      .values({
-        uid,
-        name: cleanName,
-        studentIdNumber: cleanId,
-        email: cleanEmail,
-        passwordHash: hashPassword(params.password),
-        role: 'student',
-        college: cleanCollege,
-        degree: cleanCourse,
-        avatar: '',
-        walletBalance: 0,
-        biometricEnabled: false,
-        pushNotifications: true,
-        overchargeAlerts: true,
-        preferredPayment: 'wallet',
-        emailVerified: true,
-        profileCompleted: true,
-      })
-      .returning();
+    const inserted = await db.transaction(async (tx) => {
+      await lockIdentity(tx, cleanName, cleanId);
+      const duplicate = await tx
+        .select({ uid: users.uid })
+        .from(users)
+        .where(
+          or(
+            ilike(users.email, cleanEmail),
+            eq(normalizedStudentIdColumn(), normalizeStudentId(cleanId)),
+            eq(normalizedNameColumn(), normalizeAccountName(cleanName))
+          )
+        )
+        .limit(1);
+      if (duplicate[0]) {
+        throw new AuthConflictError(
+          'An account with this email, name, or USTP ID already exists.'
+        );
+      }
 
-    await db
-      .delete(emailVerifications)
-      .where(eq(emailVerifications.email, cleanEmail));
+      const created = await tx
+        .insert(users)
+        .values({
+          uid,
+          name: cleanName,
+          studentIdNumber: cleanId,
+          email: cleanEmail,
+          passwordHash: hashPassword(params.password),
+          role: 'student',
+          college: cleanCollege,
+          degree: cleanCourse,
+          avatar: '',
+          walletBalance: 0,
+          biometricEnabled: false,
+          pushNotifications: true,
+          overchargeAlerts: true,
+          preferredPayment: 'wallet',
+          emailVerified: true,
+          profileCompleted: true,
+        })
+        .returning();
+
+      await tx
+        .delete(emailVerifications)
+        .where(eq(emailVerifications.email, cleanEmail));
+      return created;
+    });
 
     return mapUserRow(inserted[0]);
   } catch (error) {
@@ -940,41 +936,69 @@ export async function completeGoogleOnboardingDb(params: {
   }
 
   try {
-    const currentRows = await db.select().from(users).where(eq(users.uid, params.uid));
-    if (!currentRows[0]) {
-      throw new AuthValidationError('User account not found.');
-    }
+    const updated = await db.transaction(async (tx) => {
+      const currentRows = await tx
+        .select()
+        .from(users)
+        .where(eq(users.uid, params.uid))
+        .for('update');
+      const currentUser = currentRows[0];
+      if (!currentUser) {
+        throw new AuthValidationError('User account not found.');
+      }
 
-    const duplicateId = await db
-      .select()
-      .from(users)
-      .where(
-        and(
-          ilike(users.studentIdNumber, cleanId),
-          ne(users.uid, params.uid)
+      const nextName = cleanName || currentUser.name;
+      await lockIdentity(tx, nextName, cleanId);
+      const duplicateId = await tx
+        .select({ uid: users.uid })
+        .from(users)
+        .where(
+          and(
+            eq(normalizedStudentIdColumn(), normalizeStudentId(cleanId)),
+            ne(users.uid, params.uid)
+          )
         )
-      );
+        .limit(1);
+      if (duplicateId[0]) {
+        throw new AuthConflictError(
+          'This Student ID is already registered to another account.'
+        );
+      }
 
-    if (duplicateId.length > 0) {
-      throw new AuthConflictError(
-        'This Student ID is already registered to another account.'
-      );
-    }
+      if (normalizeAccountName(nextName) !== normalizeAccountName(currentUser.name)) {
+        const duplicateName = await tx
+          .select({ uid: users.uid })
+          .from(users)
+          .where(
+            and(
+              eq(normalizedNameColumn(), normalizeAccountName(nextName)),
+              ne(users.uid, params.uid)
+            )
+          )
+          .limit(1);
+        if (duplicateName[0]) {
+          throw new AuthConflictError(
+            'This name is already registered to another account.'
+          );
+        }
+      }
 
-    const updated = await db
-      .update(users)
-      .set({
-        ...(cleanName ? { name: cleanName } : {}),
-        studentIdNumber: cleanId,
-        college: cleanCollege,
-        degree: cleanCourse,
-        emailVerified: true,
-        profileCompleted: true,
-      })
-      .where(eq(users.uid, params.uid))
-      .returning();
+      const [savedUser] = await tx
+        .update(users)
+        .set({
+          ...(cleanName ? { name: cleanName } : {}),
+          studentIdNumber: cleanId,
+          college: cleanCollege,
+          degree: cleanCourse,
+          emailVerified: true,
+          profileCompleted: true,
+        })
+        .where(eq(users.uid, params.uid))
+        .returning();
+      return savedUser;
+    });
 
-    return mapUserRow(updated[0]);
+    return mapUserRow(updated);
   } catch (error) {
     if (error instanceof AuthConflictError || error instanceof AuthValidationError) {
       throw error;
@@ -1226,61 +1250,10 @@ export async function adminProvisionStaffDb(params: {
   staffId: string;
   password: string;
 }): Promise<UserAccount> {
-  await ensureCatalogSeeded();
-  const cleanName = params.name.trim();
-  const cleanEmail = params.email.trim().toLowerCase();
-  const cleanStaffId = params.staffId.trim().toUpperCase();
-
-  if (!cleanName || !cleanEmail || !cleanStaffId || !params.password) {
-    throw new AuthValidationError('All staff provisioning fields are required.');
-  }
-
-  try {
-    const existing = await db
-      .select()
-      .from(users)
-      .where(
-        or(
-          ilike(users.email, cleanEmail),
-          ilike(users.studentIdNumber, cleanStaffId)
-        )
-      );
-
-    if (existing.length > 0) {
-      throw new AuthConflictError('Staff email or ID already exists.');
-    }
-
-    const uid = `usr_admin_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
-    const inserted = await db
-      .insert(users)
-      .values({
-        uid,
-        name: cleanName,
-        studentIdNumber: cleanStaffId,
-        email: cleanEmail,
-        passwordHash: hashPassword(params.password),
-        role: 'admin',
-        college: 'USTP ICT Infrastructure & Smart Campus Operations',
-        degree: 'Station Operations Staff',
-        avatar: '',
-        walletBalance: 0,
-        biometricEnabled: true,
-        pushNotifications: true,
-        overchargeAlerts: true,
-        preferredPayment: 'wallet',
-        emailVerified: true,
-        profileCompleted: true,
-      })
-      .returning();
-
-    return mapUserRow(inserted[0]);
-  } catch (error) {
-    if (error instanceof AuthConflictError || error instanceof AuthValidationError) {
-      throw error;
-    }
-    console.error('Database staff provisioning failed:', error);
-    throw new Error('Failed to provision staff account.', { cause: error });
-  }
+  void params;
+  throw new AuthValidationError(
+    'Staff account creation is disabled. Only the designated administrator is allowed.'
+  );
 }
 
 async function releaseExpiredReservationsDb(): Promise<void> {
@@ -3201,13 +3174,47 @@ export async function updateUserProfileDb(
   }
 ): Promise<UserAccount> {
   try {
-    if (updates.college !== undefined || updates.degree !== undefined) {
-      const existingRows = await db.select().from(users).where(eq(users.uid, uid));
-      const existingUser = existingRows[0];
+    const updatedUser = await db.transaction(async (tx) => {
+      const currentRows = await tx
+        .select()
+        .from(users)
+        .where(eq(users.uid, uid))
+        .for('update');
+      const existingUser = currentRows[0];
       if (!existingUser) {
         throw new AuthValidationError('User account not found.');
       }
-      if (existingUser.role !== 'admin') {
+
+      const nextName = updates.name?.trim() ?? existingUser.name;
+      if (updates.name !== undefined && nextName.length < 2) {
+        throw new AuthValidationError('Please enter your full name (at least 2 characters).');
+      }
+
+      if (updates.name !== undefined) {
+        await lockIdentity(tx, nextName);
+        if (normalizeAccountName(nextName) !== normalizeAccountName(existingUser.name)) {
+          const duplicateName = await tx
+            .select({ uid: users.uid })
+            .from(users)
+            .where(
+              and(
+                eq(normalizedNameColumn(), normalizeAccountName(nextName)),
+                ne(users.uid, uid)
+              )
+            )
+            .limit(1);
+          if (duplicateName[0]) {
+            throw new AuthConflictError(
+              'This name is already registered to another account.'
+            );
+          }
+        }
+      }
+
+      if (
+        (updates.college !== undefined || updates.degree !== undefined) &&
+        existingUser.role !== 'admin'
+      ) {
         const nextCollege = (updates.college ?? existingUser.college).trim();
         const nextDegree = (updates.degree ?? existingUser.degree).trim();
         if (!ALLOWED_USTP_COLLEGE_VALUES.has(nextCollege)) {
@@ -3220,34 +3227,32 @@ export async function updateUserProfileDb(
           throw new AuthValidationError('Selected course does not belong to the chosen college.');
         }
       }
-    }
 
-    const updated = await db
-      .update(users)
-      .set({
-        ...(updates.name !== undefined ? { name: updates.name } : {}),
-        ...(updates.college !== undefined ? { college: updates.college.trim() } : {}),
-        ...(updates.degree !== undefined ? { degree: updates.degree.trim() } : {}),
-        ...(updates.avatar !== undefined ? { avatar: updates.avatar } : {}),
-        ...(updates.biometricEnabled !== undefined
-          ? { biometricEnabled: updates.biometricEnabled }
-          : {}),
-        ...(updates.pushNotifications !== undefined
-          ? { pushNotifications: updates.pushNotifications }
-          : {}),
-        ...(updates.overchargeAlerts !== undefined
-          ? { overchargeAlerts: updates.overchargeAlerts }
-          : {}),
-      })
-      .where(eq(users.uid, uid))
-      .returning();
+      const [savedUser] = await tx
+        .update(users)
+        .set({
+          ...(updates.name !== undefined ? { name: nextName } : {}),
+          ...(updates.college !== undefined ? { college: updates.college.trim() } : {}),
+          ...(updates.degree !== undefined ? { degree: updates.degree.trim() } : {}),
+          ...(updates.avatar !== undefined ? { avatar: updates.avatar } : {}),
+          ...(updates.biometricEnabled !== undefined
+            ? { biometricEnabled: updates.biometricEnabled }
+            : {}),
+          ...(updates.pushNotifications !== undefined
+            ? { pushNotifications: updates.pushNotifications }
+            : {}),
+          ...(updates.overchargeAlerts !== undefined
+            ? { overchargeAlerts: updates.overchargeAlerts }
+            : {}),
+        })
+        .where(eq(users.uid, uid))
+        .returning();
+      return savedUser;
+    });
 
-    if (!updated[0]) {
-      throw new Error('User account not found.');
-    }
-    return mapUserRow(updated[0]);
+    return mapUserRow(updatedUser);
   } catch (error) {
-    if (error instanceof AuthValidationError) {
+    if (error instanceof AuthConflictError || error instanceof AuthValidationError) {
       throw error;
     }
     console.error('Database profile update failed:', error);

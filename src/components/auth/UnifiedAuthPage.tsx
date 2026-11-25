@@ -101,7 +101,7 @@ export const UnifiedAuthPage: React.FC = () => {
     setGoogleLoading(true);
     const result = await loginWithGoogle();
     setGoogleLoading(false);
-    if (!result.success) {
+    if (!result.success && !result.cancelled) {
       setErrorBanner(result.error || 'Google Sign-In failed. Please try again.');
     }
   };

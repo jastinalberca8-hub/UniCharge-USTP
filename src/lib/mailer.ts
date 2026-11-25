@@ -14,9 +14,11 @@ interface MailAttachment {
   cid?: string;
 }
 
-export class EmailDeliveryNotConfiguredError extends Error {
+export class EmailDeliveryUnavailableError extends Error {
   statusCode = 503;
 }
+
+export class EmailDeliveryNotConfiguredError extends EmailDeliveryUnavailableError {}
 
 function escapeHtml(value: string): string {
   return value
@@ -72,6 +74,65 @@ function cleanEnv(val: string | undefined): string {
   const cleaned = val.trim().replace(/^["']|["']$/g, '').trim();
   if (UNSET_SENTINELS.has(cleaned.toLowerCase())) return '';
   return cleaned;
+}
+
+function isSmtpConnectionTimeout(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'ETIMEDOUT' &&
+    'command' in error &&
+    error.command === 'CONN'
+  );
+}
+
+async function sendWithResend(params: {
+  toEmail: string;
+  subject: string;
+  text: string;
+  html: string;
+  attachments?: MailAttachment[];
+}, apiKey: string, fromOverride: string): Promise<EmailSendResult> {
+  const { toEmail, subject, text, html, attachments } = params;
+  const isPublicWebmail = /@(gmail|yahoo|outlook|hotmail)\.com>?$/i.test(fromOverride);
+  const fromAddr =
+    fromOverride && !isPublicWebmail
+      ? fromOverride
+      : 'UniCharge USTP <onboarding@resend.dev>';
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: fromAddr,
+      to: [toEmail],
+      subject,
+      text,
+      html,
+      ...(attachments?.length
+        ? {
+            attachments: attachments.map((att) => ({
+              filename: att.filename,
+              content: att.content.toString('base64'),
+              ...(att.cid ? { content_id: att.cid } : {}),
+            })),
+          }
+        : {}),
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    if (res.status === 401) {
+      throw new Error(
+        'Resend API key is invalid. Check RESEND_API_KEY in your environment variables (must be an active key starting with re_), or remove it and use Gmail SMTP (SMTP_USER + SMTP_PASS) instead.'
+      );
+    }
+    throw new Error(`Email service returned ${res.status}: ${errText}`);
+  }
+  return { deliveryMode: 'resend', sentFrom: fromAddr };
 }
 
 async function deliverTransitionalEmail(params: {
@@ -131,6 +192,15 @@ async function deliverTransitionalEmail(params: {
         html,
         ...(attachments?.length ? { attachments } : {}),
       });
+    } catch (error: unknown) {
+      if (!isSmtpConnectionTimeout(error)) throw error;
+      if (resendKey.startsWith('re_')) {
+        console.warn('[Mailer] SMTP connection timed out; retrying with Resend.');
+        return await sendWithResend(params, resendKey, fromOverride);
+      }
+      throw new EmailDeliveryUnavailableError(
+        'Could not connect to the SMTP server. Your local network may block outbound email. Configure a valid RESEND_API_KEY or check SMTP_HOST and SMTP_PORT.'
+      );
     } finally {
       transporter.close();
     }
@@ -156,44 +226,7 @@ async function deliverTransitionalEmail(params: {
   }
 
   if (resendKey && resendKey.startsWith('re_')) {
-    const isPublicWebmail = /@(gmail|yahoo|outlook|hotmail)\.com>?$/i.test(fromOverride);
-    const fromAddr =
-      fromOverride && !isPublicWebmail
-        ? fromOverride
-        : 'UniCharge USTP <onboarding@resend.dev>';
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${resendKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: fromAddr,
-        to: [toEmail],
-        subject,
-        text,
-        html,
-        ...(attachments?.length
-          ? {
-              attachments: attachments.map((att) => ({
-                filename: att.filename,
-                content: att.content.toString('base64'),
-                ...(att.cid ? { content_id: att.cid } : {}),
-              })),
-            }
-          : {}),
-      }),
-    });
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      if (res.status === 401) {
-        throw new Error(
-          'Resend API key is invalid. Check RESEND_API_KEY in your environment variables (must be an active key starting with re_), or remove it and use Gmail SMTP (SMTP_USER + SMTP_PASS) instead.'
-        );
-      }
-      throw new Error(`Email service returned ${res.status}: ${errText}`);
-    }
-    return { deliveryMode: 'resend', sentFrom: fromAddr };
+    return sendWithResend(params, resendKey, fromOverride);
   }
 
   if (resendKey && !resendKey.startsWith('re_')) {

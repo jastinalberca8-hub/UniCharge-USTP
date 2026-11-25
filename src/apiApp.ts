@@ -1,7 +1,7 @@
 import express from 'express';
 import { optionalAuth, requireAuth, signAppToken, type AuthRequest } from './middleware/auth.ts';
 import {
-  EmailDeliveryNotConfiguredError,
+  EmailDeliveryUnavailableError,
   sendLockerQrUnlockEmail,
   sendPasswordResetCodeEmail,
   sendVerificationCodeEmail,
@@ -96,7 +96,7 @@ apiApp.post('/api/auth/send-verification', async (req, res) => {
     if (
       error instanceof AuthValidationError ||
       error instanceof AuthConflictError ||
-      error instanceof EmailDeliveryNotConfiguredError
+      error instanceof EmailDeliveryUnavailableError
     ) {
       return res.status(error.statusCode).json({ error: error.message });
     }
@@ -130,7 +130,7 @@ apiApp.post('/api/auth/register', async (req, res) => {
     });
     res.status(201).json({ user });
   } catch (error: unknown) {
-    if (error instanceof AuthValidationError || error instanceof AuthConflictError) {
+    if (error instanceof AuthValidationError) {
       return res.status(error.statusCode).json({ error: error.message });
     }
     const message = error instanceof Error ? error.message : 'Unable to create account.';
@@ -204,7 +204,7 @@ apiApp.post('/api/auth/forgot-password', async (req, res) => {
   } catch (error: unknown) {
     if (
       error instanceof AuthValidationError ||
-      error instanceof EmailDeliveryNotConfiguredError
+      error instanceof EmailDeliveryUnavailableError
     ) {
       return res.status(error.statusCode).json({ error: error.message });
     }
@@ -228,7 +228,7 @@ apiApp.post('/api/auth/reset-password', async (req, res) => {
       message: 'Your password has been reset. You can now sign in with your new password.',
     });
   } catch (error: unknown) {
-    if (error instanceof AuthValidationError) {
+    if (error instanceof AuthValidationError || error instanceof AuthConflictError) {
       return res.status(error.statusCode).json({ error: error.message });
     }
     const message =
@@ -246,6 +246,9 @@ apiApp.get('/api/bootstrap', requireAuth, async (req: AuthRequest, res) => {
     const data = await getBootstrapData(uid, email, name);
     res.json(data);
   } catch (error: unknown) {
+    if (error instanceof AuthConflictError || error instanceof AuthValidationError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     const message =
       error instanceof Error ? error.message : 'Failed to load workspace data';
     console.error('Bootstrap route error:', error);
@@ -328,7 +331,7 @@ apiApp.patch('/api/profile', requireAuth, async (req: AuthRequest, res) => {
     });
     res.json({ user });
   } catch (error: unknown) {
-    if (error instanceof AuthValidationError) {
+    if (error instanceof AuthValidationError || error instanceof AuthConflictError) {
       return res.status(error.statusCode).json({ error: error.message });
     }
     const message = error instanceof Error ? error.message : 'Profile update failed';
@@ -457,7 +460,7 @@ apiApp.post('/api/kiosk/email-unlock-qr', requireAuth, async (req: AuthRequest, 
   } catch (error: unknown) {
     if (
       error instanceof AuthValidationError ||
-      error instanceof EmailDeliveryNotConfiguredError
+      error instanceof EmailDeliveryUnavailableError
     ) {
       return res.status(error.statusCode).json({ error: error.message });
     }

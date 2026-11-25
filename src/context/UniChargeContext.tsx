@@ -33,7 +33,10 @@ import {
   getDefaultTierForService,
   resolvePricingTier,
 } from '../constants/pricing';
-import { RETIRED_DEMO_USER_UID } from '../constants/seededAccounts';
+import {
+  RETIRED_DEMO_USER_UID,
+  RETIRED_SEEDED_ADMIN_UIDS,
+} from '../constants/seededAccounts';
 import { sound } from '../utils/audio';
 import {
   formatSessionDateTime,
@@ -58,6 +61,7 @@ export type AppRoute =
 interface AuthResult {
   success: boolean;
   error?: string;
+  cancelled?: boolean;
   user?: UserAccount;
 }
 
@@ -272,8 +276,12 @@ function writeStorage<T>(key: string, value: T): void {
 }
 
 function loadUsers(): UserAccount[] {
+  const retiredIds = new Set<string>([
+    RETIRED_DEMO_USER_UID,
+    ...RETIRED_SEEDED_ADMIN_UIDS,
+  ]);
   return readStorage<UserAccount[]>(STORAGE_KEYS.users, SEEDED_USERS).filter(
-    (user) => user.id !== RETIRED_DEMO_USER_UID
+    (user) => !retiredIds.has(user.id)
   );
 }
 
@@ -311,7 +319,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [users, setUsers] = useState<UserAccount[]>(loadUsers);
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => {
     const savedId = readStorage<string | null>(STORAGE_KEYS.currentUserId, null);
-    if (!savedId || savedId === RETIRED_DEMO_USER_UID) return null;
+    if (!savedId || !loadUsers().some((user) => user.id === savedId)) return null;
     const savedUsers = loadUsers();
     return savedUsers.find((u) => u.id === savedId) ?? null;
   });
@@ -1067,7 +1075,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         } finally {
           if (!auth.currentUser) logoutInProgressRef.current = false;
         }
-        return { success: false, error: 'Sign-in was cancelled.' };
+        return { success: false, cancelled: true };
       }
       authGenerationRef.current += 1;
       logoutInProgressRef.current = false;
@@ -1091,6 +1099,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       return { success: true, user: loadedUser };
     } catch (error: unknown) {
       const code = (error as { code?: string })?.code;
+      if (code === 'auth/popup-closed-by-user') {
+        return { success: false, cancelled: true };
+      }
       if (code === 'auth/unauthorized-domain') {
         const host =
           typeof window !== 'undefined' ? window.location.hostname : 'this domain';

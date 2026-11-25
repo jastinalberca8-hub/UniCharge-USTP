@@ -971,16 +971,45 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         const expiredSlot = pendingUnlockToken.slotNumber;
         const expiredStationId = pendingUnlockToken.stationId;
         setReservationTimeoutMessage(
-          `Reservation timed out (5-minute limit) — ${formatCompartmentLabel(
-            expiredSlot
-          )} released with ₱0 charged.`
+          `Reservation expired — releasing ${formatCompartmentLabel(expiredSlot)}.`
         );
 
         if (isBackendSessionRef.current) {
-          window.setTimeout(() => {
-            void syncStationState();
-            notifyStationSync();
-          }, 700);
+          const expiredTokenId = pendingUnlockToken.tokenId;
+          setPendingUnlockToken((current) =>
+            current?.tokenId === expiredTokenId ? null : current
+          );
+          void authorizedFetch(
+            `/api/kiosk/unlock-tokens/${encodeURIComponent(expiredTokenId)}`,
+            { method: 'DELETE' }
+          )
+            .then((data) => {
+              if (!Array.isArray(data?.stations) || data.stations.length === 0) {
+                throw new Error('Station release status was not returned.');
+              }
+              const nextStations = data.stations as KioskStation[];
+              setStations(nextStations);
+              setSelectedStation(
+                (prev) =>
+                  nextStations.find((station) => station.id === prev.id) ||
+                  nextStations[0]
+              );
+              setReservationTimeoutMessage(
+                `Reservation timed out — ${formatCompartmentLabel(
+                  expiredSlot
+                )} released with ₱0 charged.`
+              );
+              notifyStationSync();
+            })
+            .catch((error: unknown) => {
+              const message =
+                error instanceof Error ? error.message : 'Locker release could not be confirmed.';
+              console.error('Expired reservation release failed:', error);
+              setReservationTimeoutMessage(
+                `Reservation expired, but release could not be confirmed (${message}). Refresh the station before booking again.`
+              );
+              void syncStationState();
+            });
         } else {
           setStations((prevStations) =>
             prevStations.map((st) => {
@@ -1005,7 +1034,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     updateLeft();
     const timer = setInterval(updateLeft, 500);
     return () => clearInterval(timer);
-  }, [pendingUnlockToken, notifyStationSync, syncStationState]);
+  }, [pendingUnlockToken, notifyStationSync, syncStationState, authorizedFetch]);
 
   // Active Session Timer & Dynamic Telemetry (keeps locker locked & stops charging at 00:00)
   useEffect(() => {

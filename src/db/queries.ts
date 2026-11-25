@@ -2613,6 +2613,23 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
   }
 
   if (tokenRow.used) {
+    const redeemedSession = await db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(
+        and(
+          eq(sessions.userUid, tokenRow.userUid),
+          eq(sessions.qrVerificationCode, tokenRow.qrPayload)
+        )
+      )
+      .limit(1);
+
+    if (!redeemedSession[0]) {
+      throw new AuthValidationError(
+        'This QR pass was cancelled or released before it created a session. It is no longer valid; avail a locker and generate a new pass.'
+      );
+    }
+
     throw new AuthValidationError(
       'This QR unlock pass has already been redeemed. Avail a locker to generate a new pass.'
     );

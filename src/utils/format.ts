@@ -19,6 +19,19 @@ export function formatSessionTimer(totalSecs: number): string {
   return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
+export function getRemainingSessionSeconds(
+  startTimeMs: number,
+  durationMinutes: number,
+  nowMs = Date.now()
+): number {
+  const expiresAtMs = startTimeMs + durationMinutes * 60_000;
+  const durationSeconds = Math.max(0, durationMinutes * 60);
+  return Math.min(
+    durationSeconds,
+    Math.max(0, Math.ceil((expiresAtMs - nowMs) / 1000))
+  );
+}
+
 export function formatSessionDateTime(input: number | Date): string {
   const parsed = input instanceof Date ? input : new Date(input);
   const validDate = Number.isNaN(parsed.getTime()) ? new Date() : parsed;

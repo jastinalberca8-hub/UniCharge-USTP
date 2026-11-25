@@ -217,6 +217,13 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
       return;
     }
     const nextTotal = coinInserted + denomination;
+    if (nextTotal > requiredCoinFee) {
+      setScanFeedback({
+        type: 'error',
+        text: `That coin would exceed the exact ₱${requiredCoinFee.toFixed(2)} fee. Return coins or insert a smaller denomination.`,
+      });
+      return;
+    }
     if (coinInserted < requiredCoinFee && nextTotal >= requiredCoinFee) {
       sound.playBeep();
     } else {
@@ -995,11 +1002,6 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
                             }}
                           />
                         </div>
-                        {coinInserted > requiredCoinFee && (
-                          <div className="text-[9px] text-[#5BC496] font-mono text-right">
-                            +₱{(coinInserted - requiredCoinFee).toFixed(2)} change → Campus E-Wallet
-                          </div>
-                        )}
                       </div>
 
                       {/* Coin Denomination Buttons + Reset */}
@@ -1009,7 +1011,8 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
                             key={val}
                             type="button"
                             onClick={() => handleInsertCoin(val)}
-                            className="h-7 rounded-lg bg-[#EDF2F5] hover:bg-[#5BC496]/25 border border-[#E2E8F0] text-[10px] font-mono font-bold text-[#1E293B] cursor-pointer"
+                            disabled={isVerifying || coinInserted + val > requiredCoinFee}
+                            className="h-7 rounded-lg bg-[#EDF2F5] hover:bg-[#5BC496]/25 border border-[#E2E8F0] text-[10px] font-mono font-bold text-[#1E293B] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             +₱{val}
                           </button>
@@ -1118,7 +1121,12 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
             <div className="grid grid-cols-2 gap-2.5">
               <button
                 type="button"
-                disabled={isAdminMonitor}
+                disabled={
+                  isAdminMonitor ||
+                  (screenMode === 'insert_coin' &&
+                    Boolean(coinAuthTarget) &&
+                    coinInserted + 5 > requiredCoinFee)
+                }
                 title={
                   isAdminMonitor
                     ? 'Student-only kiosk scanner (Admin Monitor Mode)'
@@ -1198,6 +1206,10 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
                 className={`p-2.5 rounded-2xl border text-center transition-colors shadow-sm ${
                   isAdminMonitor
                     ? 'bg-[#27333C]/65 border-[#1E293B]/60 opacity-60 cursor-not-allowed'
+                  : screenMode === 'insert_coin' &&
+                    coinAuthTarget &&
+                    coinInserted + 5 > requiredCoinFee
+                  ? 'bg-[#27333C]/65 border-[#1E293B]/60 opacity-60 cursor-not-allowed'
                     : screenMode === 'insert_coin' && coinAuthTarget
                     ? 'bg-[#1E293B] border-[#5BC496] ring-1 ring-[#5BC496]/60 cursor-pointer'
                     : 'bg-[#27333C] hover:bg-[#1E293B] border-[#1E293B] cursor-pointer'

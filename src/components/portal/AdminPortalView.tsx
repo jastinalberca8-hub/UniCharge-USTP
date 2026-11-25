@@ -15,7 +15,6 @@ import {
   Unlock,
   Wrench,
   CheckCircle2,
-  Plus,
   Shield,
   AlertTriangle,
   Radio,
@@ -63,17 +62,9 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
     adminStationActivity,
     adminRemoteUnlockSlot,
     adminToggleSlotMaintenance,
-    adminProvisionStaff,
     resolveSecurityAlert,
   } = useUniCharge();
 
-  const [showProvisionModal, setShowProvisionModal] = useState(false);
-  const [staffName, setStaffName] = useState('');
-  const [staffEmail, setStaffEmail] = useState('');
-  const [staffId, setStaffId] = useState('');
-  const [staffPassword, setStaffPassword] = useState('');
-  const [provisionError, setProvisionError] = useState<string | null>(null);
-  const [provisionSuccess, setProvisionSuccess] = useState<string | null>(null);
   const [roleFilter, setRoleFilter] = useState<'all' | 'student' | 'admin'>('all');
   const [hardwareFeedback, setHardwareFeedback] = useState<{
     type: 'success' | 'error';
@@ -97,27 +88,6 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
   const storageFree = station
     ? station.slots.filter((s) => s.category === 'storage' && s.status === 'available').length
     : 0;
-
-  const handleCreateStaff = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setProvisionError(null);
-    const res = await adminProvisionStaff({
-      name: staffName,
-      email: staffEmail,
-      staffId,
-      password: staffPassword,
-    });
-    if (!res.success) {
-      setProvisionError(res.error || 'Failed to provision staff account.');
-      return;
-    }
-    setProvisionSuccess(`Admin account ${res.user?.email} (${res.user?.studentIdNumber}) provisioned.`);
-    setStaffName('');
-    setStaffEmail('');
-    setStaffId('');
-    setStaffPassword('');
-    setShowProvisionModal(false);
-  };
 
   // 1. STATION TELEMETRY OVERVIEW
   if (section === 'overview') {
@@ -257,7 +227,10 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
             </div>
             <span className="text-xs font-mono text-[#64748B]">
               {adminStationActivity.pendingReservations.length} Reserved ·{' '}
-              {adminStationActivity.activeSessions.length} Active
+              {adminStationActivity.activeSessions.filter((session) => session.kind === 'active').length}{' '}
+              Active ·{' '}
+              {adminStationActivity.activeSessions.filter((session) => session.kind === 'expired').length}{' '}
+              Timed Out
             </span>
           </div>
           <div className="overflow-x-auto">
@@ -304,6 +277,8 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                               ? 'bg-amber-50 text-[#B45309] border border-amber-200'
                               : tx.kind === 'active'
                               ? 'bg-[#EBF9F3] text-[#15803D] border border-[#5BC496]/40'
+                              : tx.kind === 'expired'
+                              ? 'bg-amber-50 text-[#B45309] border border-amber-200'
                               : 'bg-[#F8FAFC] text-[#64748B] border border-[#E2E8F0]'
                           }`}
                         >
@@ -311,6 +286,8 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                             ? 'Reserved (Awaiting Scan)'
                             : tx.kind === 'active'
                             ? 'Active Session'
+                            : tx.kind === 'expired'
+                            ? 'Time Expired · Retrieve'
                             : 'Completed'}
                         </span>
                       </td>
@@ -520,28 +497,10 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
               Users &amp; RBAC Account Directory
             </h1>
             <p className="text-sm text-[#64748B]">
-              Account roles are strictly bound at record level. Public signup only creates student accounts; staff accounts are provisioned internally here.
+              Review user accounts and their assigned access roles.
             </p>
           </div>
-          <button
-            onClick={() => {
-              sound.playTap();
-              setProvisionError(null);
-              setShowProvisionModal(true);
-            }}
-            className="px-4 py-2.5 rounded-xl bg-[#5BC496] text-[#1E293B] text-xs font-bold hover:bg-[#48AD80] flex items-center gap-2 cursor-pointer shadow-sm shrink-0 transition-colors"
-          >
-            <Plus className="w-4 h-4 text-[#1E293B]" />
-            <span>Create Account (Staff)</span>
-          </button>
         </div>
-
-        {provisionSuccess && (
-          <div className="p-3.5 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/40 text-[#1E293B] text-xs font-medium flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-[#5BC496] shrink-0" />
-            <span>{provisionSuccess}</span>
-          </div>
-        )}
 
         <div className="flex items-center gap-2">
           {(['all', 'student', 'admin'] as const).map((rf) => (
@@ -606,89 +565,6 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
           </div>
         </div>
 
-        {/* Provision Staff Modal */}
-        {showProvisionModal && (
-          <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
-            <div className="w-full max-w-md bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] border-t-4 border-t-[#4E6E81] p-6 shadow-xl">
-              <h3 className="text-base font-bold text-[#1E293B]">
-                Provision Internal Staff / Admin Account
-              </h3>
-              <p className="text-xs text-[#64748B] mt-1 mb-4">
-                Creates an authorized account with <code className="font-mono text-[#4E6E81]">role: &apos;admin&apos;</code>.
-              </p>
-
-              {provisionError && (
-                <div className="mb-3 p-2.5 rounded-lg bg-red-50 border border-red-200 text-[#DC2626] text-xs">
-                  {provisionError}
-                </div>
-              )}
-
-              <form onSubmit={handleCreateStaff} className="space-y-3">
-                <div>
-                  <label className="block text-xs font-semibold text-[#1E293B] mb-1">Full Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={staffName}
-                    onChange={(e) => setStaffName(e.target.value)}
-                    placeholder="Engr. Ramon Magsaysay"
-                    className="w-full h-10 px-3 rounded-xl border border-[#E2E8F0] text-sm focus:outline-none focus:border-[#4E6E81]"
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-[#1E293B] mb-1">Staff ID</label>
-                    <input
-                      type="text"
-                      required
-                      value={staffId}
-                      onChange={(e) => setStaffId(e.target.value)}
-                      placeholder="ADMIN-07"
-                      className="w-full h-10 px-3 rounded-xl border border-[#E2E8F0] text-sm font-mono focus:outline-none focus:border-[#4E6E81]"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-[#1E293B] mb-1">Password</label>
-                    <input
-                      type="password"
-                      required
-                      value={staffPassword}
-                      onChange={(e) => setStaffPassword(e.target.value)}
-                      placeholder="Min. 6 chars"
-                      className="w-full h-10 px-3 rounded-xl border border-[#E2E8F0] text-sm focus:outline-none focus:border-[#4E6E81]"
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-[#1E293B] mb-1">USTP Staff Username / Email</label>
-                  <input
-                    type="text"
-                    required
-                    value={staffEmail}
-                    onChange={(e) => setStaffEmail(e.target.value)}
-                    placeholder="firstname.ustp.ph"
-                    className="w-full h-10 px-3 rounded-xl border border-[#E2E8F0] text-sm focus:outline-none focus:border-[#4E6E81]"
-                  />
-                </div>
-                <div className="flex gap-2 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowProvisionModal(false)}
-                    className="flex-1 h-10 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#64748B] hover:bg-[#F8FAFC] cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="flex-1 h-10 rounded-xl bg-[#5BC496] text-[#1E293B] text-xs font-bold hover:bg-[#48AD80] cursor-pointer"
-                  >
-                    Create Admin Account
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
       </div>
     );
   }

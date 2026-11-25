@@ -26,7 +26,11 @@ import {
   normalizeServiceType,
   resolvePricingTier,
 } from '../constants/pricing.ts';
-import { formatSessionDateTime } from '../utils/format.ts';
+import { RETIRED_DEMO_USER_UID } from '../constants/seededAccounts.ts';
+import {
+  formatSessionDateTime,
+  getRemainingSessionSeconds,
+} from '../utils/format.ts';
 import type {
   ActiveSession,
   AdminStationActivity,
@@ -48,6 +52,10 @@ import type {
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const STUDENT_ID_REGEX = /^[A-Za-z0-9-]{4,24}$/;
+
+function hasExactCurrencyAmount(amount: number, expected: number): boolean {
+  return Number.isFinite(amount) && Math.round(amount * 100) === Math.round(expected * 100);
+}
 
 function hashVerificationCode(code: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -324,22 +332,6 @@ const DEFAULT_DB_ACCOUNTS = [
     overchargeAlerts: true,
     preferredPayment: 'wallet',
   },
-  {
-    uid: 'usr_ustp_202210481',
-    name: 'Marco Villanueva',
-    studentIdNumber: '2022-10481',
-    email: 'm.villanueva@ustp.edu.ph',
-    passwordPlain: 'student123',
-    role: 'student',
-    college: 'College of Engineering and Architecture (CEA)',
-    degree: 'BS Electrical Engineering',
-    avatar: '',
-    walletBalance: 280.0,
-    biometricEnabled: false,
-    pushNotifications: true,
-    overchargeAlerts: true,
-    preferredPayment: 'gcash',
-  },
 ] as const;
 
 export async function ensureCatalogSeeded(): Promise<void> {
@@ -489,23 +481,33 @@ export async function ensureCatalogSeeded(): Promise<void> {
           });
       }
 
-      // Remove legacy default admin (Engr. Elena Cruz) and any linked rows cleanly
-      const legacyAdmins = await db
-        .select({ uid: users.uid })
-        .from(users)
-        .where(
-          or(
-            ilike(users.email, 'admin@ustp.edu.ph'),
-            inArray(users.uid, ['usr_ustp_admin01', 'usr_ustp_admin_01'])
-          )
-        );
-      if (legacyAdmins.length > 0) {
-        const legacyUids = legacyAdmins.map((a) => a.uid);
-        await db.delete(lockerUnlockTokens).where(inArray(lockerUnlockTokens.userUid, legacyUids));
-        await db.delete(walletTransactions).where(inArray(walletTransactions.userUid, legacyUids));
-        await db.delete(sessions).where(inArray(sessions.userUid, legacyUids));
-        await db.delete(users).where(inArray(users.uid, legacyUids));
-      }
+      // Remove retired demo accounts and their linked records.
+      await db.transaction(async (tx) => {
+        const retiredAccounts = await tx
+          .select({ uid: users.uid })
+          .from(users)
+          .where(
+            or(
+              ilike(users.email, 'admin@ustp.edu.ph'),
+              inArray(users.uid, [
+                'usr_ustp_admin01',
+                'usr_ustp_admin_01',
+                RETIRED_DEMO_USER_UID,
+              ])
+            )
+          );
+        if (retiredAccounts.length === 0) return;
+
+        const retiredUids = retiredAccounts.map((account) => account.uid);
+        await tx
+          .delete(lockerUnlockTokens)
+          .where(inArray(lockerUnlockTokens.userUid, retiredUids));
+        await tx
+          .delete(walletTransactions)
+          .where(inArray(walletTransactions.userUid, retiredUids));
+        await tx.delete(sessions).where(inArray(sessions.userUid, retiredUids));
+        await tx.delete(users).where(inArray(users.uid, retiredUids));
+      });
 
       for (const acct of DEFAULT_DB_ACCOUNTS) {
         await db
@@ -1294,53 +1296,119 @@ async function releaseExpiredReservationsDb(): Promise<void> {
     )
     .returning();
 
-  if (expiredTokens.length === 0) return;
+  if (expiredTokens.length > 0) {
+    const seenSlots = new Set<string>();
+    for (const tok of expiredTokens) {
+      const key = `${tok.stationId}:${tok.slotNumber}`;
+      if (seenSlots.has(key)) continue;
+      seenSlots.add(key);
 
-  const seenSlots = new Set<string>();
-  for (const tok of expiredTokens) {
-    const key = `${tok.stationId}:${tok.slotNumber}`;
-    if (seenSlots.has(key)) continue;
-    seenSlots.add(key);
-
-    const activeOnSlot = await db
-      .select({ id: sessions.id })
-      .from(sessions)
-      .where(
-        and(
-          eq(sessions.stationId, tok.stationId),
-          eq(sessions.slotNumber, tok.slotNumber),
-          eq(sessions.status, 'active')
+      const activeOnSlot = await db
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(
+          and(
+            eq(sessions.stationId, tok.stationId),
+            eq(sessions.slotNumber, tok.slotNumber),
+            eq(sessions.status, 'active')
+          )
         )
-      )
-      .limit(1);
+        .limit(1);
 
-    if (activeOnSlot.length > 0) continue;
+      if (activeOnSlot.length > 0) continue;
 
-    const remainingToken = await db
-      .select({ id: lockerUnlockTokens.id })
+      const remainingToken = await db
+        .select({ id: lockerUnlockTokens.id })
+        .from(lockerUnlockTokens)
+        .where(
+          and(
+            eq(lockerUnlockTokens.stationId, tok.stationId),
+            eq(lockerUnlockTokens.slotNumber, tok.slotNumber),
+            eq(lockerUnlockTokens.used, false),
+            gt(lockerUnlockTokens.expiresAt, now)
+          )
+        )
+        .limit(1);
+
+      if (remainingToken.length > 0) continue;
+
+      await db
+        .update(lockerSlots)
+        .set({ status: 'available', isDoorOpen: false, isLocked: true })
+        .where(
+          and(
+            eq(lockerSlots.stationId, tok.stationId),
+            eq(lockerSlots.slotNumber, tok.slotNumber),
+            eq(lockerSlots.status, 'in_use')
+          )
+        );
+    }
+  }
+
+  const [activeSessionRows, activeTokenSlots, slotRows] = await Promise.all([
+    db
+      .select({
+        id: sessions.id,
+        stationId: sessions.stationId,
+        slotNumber: sessions.slotNumber,
+        startTimeMs: sessions.startTimeMs,
+        durationMinutes: sessions.durationMinutes,
+        remainingSeconds: sessions.remainingSeconds,
+        chargingRateWatts: sessions.chargingRateWatts,
+        batteryCurrent: sessions.batteryCurrent,
+        serviceType: sessions.serviceType,
+      })
+      .from(sessions)
+      .where(eq(sessions.status, 'active')),
+    db
+      .select({ stationId: lockerUnlockTokens.stationId, slotNumber: lockerUnlockTokens.slotNumber })
       .from(lockerUnlockTokens)
       .where(
         and(
-          eq(lockerUnlockTokens.stationId, tok.stationId),
-          eq(lockerUnlockTokens.slotNumber, tok.slotNumber),
           eq(lockerUnlockTokens.used, false),
           gt(lockerUnlockTokens.expiresAt, now)
         )
-      )
-      .limit(1);
-
-    if (remainingToken.length > 0) continue;
-
+      ),
+    db.select().from(lockerSlots),
+  ]);
+  const nowMs = Date.now();
+  for (const session of activeSessionRows) {
+    if (getRemainingSessionSeconds(session.startTimeMs, session.durationMinutes, nowMs) > 0) {
+      continue;
+    }
+    if (session.remainingSeconds === 0 && Number(session.chargingRateWatts) === 0) {
+      continue;
+    }
+    // Time expiration stops charging; the locker stays occupied until retrieval.
     await db
-      .update(lockerSlots)
-      .set({ status: 'available', isDoorOpen: false, isLocked: true })
-      .where(
-        and(
-          eq(lockerSlots.stationId, tok.stationId),
-          eq(lockerSlots.slotNumber, tok.slotNumber),
-          eq(lockerSlots.status, 'in_use')
-        )
-      );
+      .update(sessions)
+      .set({
+        remainingSeconds: 0,
+        chargingRateWatts: 0,
+        ...(session.serviceType === 'charging' ? { batteryCurrent: 100 } : {}),
+      })
+      .where(eq(sessions.id, session.id));
+  }
+  const occupiedSlots = new Set(
+    [...activeSessionRows, ...activeTokenSlots].map(
+      (row) => `${row.stationId}:${row.slotNumber}`
+    )
+  );
+
+  for (const slot of slotRows) {
+    if (slot.status === 'maintenance') continue;
+    const occupied = occupiedSlots.has(`${slot.stationId}:${slot.slotNumber}`);
+    if (occupied && slot.status !== 'in_use') {
+      await db
+        .update(lockerSlots)
+        .set({ status: 'in_use' })
+        .where(eq(lockerSlots.id, slot.id));
+    } else if (!occupied && slot.status === 'in_use') {
+      await db
+        .update(lockerSlots)
+        .set({ status: 'available', isDoorOpen: false, isLocked: true })
+        .where(eq(lockerSlots.id, slot.id));
+    }
   }
 }
 
@@ -1353,6 +1421,8 @@ export async function fetchStationsWithSlots(): Promise<KioskStation[]> {
       db
         .select({
           stationId: sessions.stationId,
+          startTimeMs: sessions.startTimeMs,
+          durationMinutes: sessions.durationMinutes,
           chargingRateWatts: sessions.chargingRateWatts,
         })
         .from(sessions)
@@ -1379,7 +1449,11 @@ export async function fetchStationsWithSlots(): Promise<KioskStation[]> {
       ).length;
       const livePowerDrawWatts = Math.round(
         activeSessionRows
-          .filter((r) => r.stationId === st.id)
+          .filter(
+            (r) =>
+              r.stationId === st.id &&
+              getRemainingSessionSeconds(r.startTimeMs, r.durationMinutes) > 0
+          )
           .reduce((sum, r) => sum + Number(r.chargingRateWatts || 0), 0)
       );
 
@@ -1467,7 +1541,10 @@ export async function fetchUserSessionState(userUid: string): Promise<{
           }).name,
           startTime: activeRow.startTimeMs,
           durationMinutes: activeRow.durationMinutes,
-          remainingSeconds: activeRow.remainingSeconds,
+          remainingSeconds: getRemainingSessionSeconds(
+            activeRow.startTimeMs,
+            activeRow.durationMinutes
+          ),
           totalFee: activeRow.totalFee,
           batteryInitial: activeRow.batteryInitial,
           batteryCurrent: activeRow.batteryCurrent,
@@ -1647,9 +1724,14 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
             ? r.paymentMethod
             : 'wallet';
 
+        const remainingSeconds = getRemainingSessionSeconds(
+          r.startTimeMs,
+          r.durationMinutes
+        );
+
         return {
           id: r.sessionId,
-          kind: 'active',
+          kind: remainingSeconds > 0 ? 'active' : 'expired',
           userUid: r.userUid ?? null,
           userName: owner?.name || 'USTP Student',
           studentIdNumber: owner?.studentIdNumber || '—',
@@ -1664,6 +1746,7 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
           totalFee: Number(r.totalFee),
           paymentMethod: resolvedMethod,
           createdAtMs: r.startTimeMs || r.createdAt.getTime(),
+          remainingSeconds,
         };
       });
 
@@ -1700,9 +1783,19 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
             ? r.paymentMethod
             : 'wallet';
 
+        const remainingSeconds =
+          r.status === 'active'
+            ? getRemainingSessionSeconds(r.startTimeMs, r.durationMinutes)
+            : undefined;
+
         return {
           id: r.sessionId,
-          kind: r.status === 'active' ? 'active' : 'completed',
+          kind:
+            r.status !== 'active'
+              ? 'completed'
+              : remainingSeconds && remainingSeconds > 0
+              ? 'active'
+              : 'expired',
           userUid: r.userUid ?? null,
           userName: owner?.name || 'USTP Student',
           studentIdNumber: owner?.studentIdNumber || '—',
@@ -1717,6 +1810,7 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
           totalFee: Number(r.totalFee),
           paymentMethod: resolvedMethod,
           createdAtMs: r.startTimeMs || r.createdAt.getTime(),
+          remainingSeconds,
         };
       }
     );
@@ -1742,6 +1836,7 @@ export async function getBootstrapData(
   displayName?: string
 ) {
   await ensureCatalogSeeded();
+  await releaseExpiredReservationsDb();
   const user = await getOrCreateUser(uid, email, displayName);
   const [stationList, alertList, userSessions, walletTxList] = await Promise.all([
     fetchStationsWithSlots(),
@@ -1980,13 +2075,43 @@ export async function createUnlockTokenDb(params: {
   }
 
   const insertedToken = await db.transaction(async (tx) => {
+    const lockedActorRows = await tx
+      .select()
+      .from(users)
+      .where(eq(users.uid, actor.uid))
+      .for('update');
+    const lockedActor = lockedActorRows[0];
+    if (!lockedActor) {
+      throw new AuthValidationError('User account not found.');
+    }
+
+    const activeSession = await tx
+      .select({ slotNumber: sessions.slotNumber })
+      .from(sessions)
+      .where(and(eq(sessions.userUid, lockedActor.uid), eq(sessions.status, 'active')))
+      .limit(1);
+    if (activeSession[0]) {
+      throw new AuthValidationError(
+        `You already have an active session in ${formatCompartmentLabel(
+          activeSession[0].slotNumber
+        )}. Please retrieve your item and end your session before using another compartment.`
+      );
+    }
+    if (validPayment === 'wallet' && Number(lockedActor.walletBalance) < totalFee) {
+      throw new AuthValidationError(
+        `Insufficient campus e-wallet balance (₱${Number(lockedActor.walletBalance).toFixed(
+          2
+        )}). Please reload via GCash/Maya/GoTyme or select an online e-payment platform.`
+      );
+    }
+
     // Release any prior unused reservation held by this student first
     const priorTokens = await tx
       .update(lockerUnlockTokens)
       .set({ used: true })
       .where(
         and(
-          eq(lockerUnlockTokens.userUid, actor.uid),
+          eq(lockerUnlockTokens.userUid, lockedActor.uid),
           eq(lockerUnlockTokens.used, false)
         )
       )
@@ -2049,15 +2174,22 @@ export async function createUnlockTokenDb(params: {
     }
 
     // Reserve compartment as busy (in_use) immediately so Admin & other students see it
-    await tx
+    const claimedSlot = await tx
       .update(lockerSlots)
       .set({ status: 'in_use', isDoorOpen: false, isLocked: true })
       .where(
         and(
           eq(lockerSlots.stationId, station.id),
-          eq(lockerSlots.slotNumber, requestedSlot.slotNumber)
+          eq(lockerSlots.slotNumber, requestedSlot.slotNumber),
+          eq(lockerSlots.status, 'available')
         )
+      )
+      .returning({ id: lockerSlots.id });
+    if (!claimedSlot[0]) {
+      throw new AuthValidationError(
+        'Selected compartment is no longer available. Please choose a free compartment.'
       );
+    }
 
     const pinCode = String(crypto.randomInt(100000, 1000000));
     const tokenId = `TOK-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
@@ -2069,7 +2201,7 @@ export async function createUnlockTokenDb(params: {
       .insert(lockerUnlockTokens)
       .values({
         tokenId,
-        userUid: actor.uid,
+        userUid: lockedActor.uid,
         stationId: station.id,
         stationName: station.name,
         stationCode: station.campusCode,
@@ -2394,6 +2526,13 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
         )}.`,
       };
     }
+    if (!hasExactCurrencyAmount(insertedCoins, preResolvedTier.fee)) {
+      throw new AuthValidationError(
+        `Exact payment is required: insert ₱${preResolvedTier.fee.toFixed(
+          2
+        )}. Overpayment is not accepted.`
+      );
+    }
   }
 
   const result = await db.transaction(async (tx) => {
@@ -2449,7 +2588,8 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
     const ownerRows = await tx
       .select()
       .from(users)
-      .where(eq(users.uid, tokenRow.userUid));
+      .where(eq(users.uid, tokenRow.userUid))
+      .for('update');
     const owner = ownerRows[0];
     if (!owner) {
       throw new AuthValidationError('Account associated with this QR pass was not found.');
@@ -2504,22 +2644,12 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
       updatedOwner = savedOwner[0];
     } else if (tokenRow.paymentMethod === 'cash') {
       const insertedCoins = Number(params.coinInsertedAmount ?? 0);
-      if (!Number.isFinite(insertedCoins) || insertedCoins < computedFee) {
+      if (!hasExactCurrencyAmount(insertedCoins, computedFee)) {
         throw new AuthValidationError(
-          `Insert at least ₱${computedFee.toFixed(2)} in coins to unlock ${formatCompartmentLabel(
-            tokenRow.slotNumber
-          )}.`
+          `Exact payment is required: insert ₱${computedFee.toFixed(
+            2
+          )}. Overpayment is not accepted.`
         );
-      }
-      coinChangeCredited = Math.max(0, +(insertedCoins - computedFee).toFixed(2));
-      if (coinChangeCredited > 0) {
-        const nextBalance = Number(owner.walletBalance ?? 0) + coinChangeCredited;
-        const savedOwner = await tx
-          .update(users)
-          .set({ walletBalance: nextBalance })
-          .where(eq(users.uid, owner.uid))
-          .returning();
-        updatedOwner = savedOwner[0];
       }
     }
 
@@ -2595,18 +2725,6 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
         walletDelta: 0,
         balanceAfter: currentWalletBalance,
       });
-      if (coinChangeCredited > 0) {
-        await recordWalletTransaction(tx, {
-          userUid: owner.uid,
-          kind: 'coin_change',
-          paymentSource: 'coin_change',
-          title: `Coin Overpayment Change (${compartmentLabel})`,
-          referenceCode: sessionId,
-          amount: coinChangeCredited,
-          walletDelta: coinChangeCredited,
-          balanceAfter: currentWalletBalance,
-        });
-      }
     } else if (
       normalizedTokenMethod === 'gcash' ||
       normalizedTokenMethod === 'maya' ||
@@ -2642,11 +2760,6 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
     fetchStationsWithSlots(),
     fetchWalletTransactionsDb(result.updatedOwner.uid),
   ]);
-  const changeSuffix =
-    result.coinChangeCredited > 0
-      ? ` Change ₱${result.coinChangeCredited.toFixed(2)} credited to Campus E-Wallet.`
-      : '';
-
   return {
     action: 'unlocked',
     user: mapUserRow(result.updatedOwner),
@@ -2654,9 +2767,9 @@ export async function verifyAndConsumeUnlockTokenDb(params: {
     stations: updatedStations,
     walletTransactions: walletTxList,
     coinChangeCredited: result.coinChangeCredited,
-    message: `Kiosk Verified! ${formatCompartmentLabel(
+    message: `Exact coin payment accepted. Kiosk Verified! ${formatCompartmentLabel(
       result.newSession.slotNumber
-    )} Solenoid Unlatched at ${result.newSession.stationName}.${changeSuffix}`,
+    )} Solenoid Unlatched at ${result.newSession.stationName}.`,
   };
 }
 
@@ -2745,6 +2858,13 @@ export async function coinWalkUpUnlockDb(params: {
       ).toFixed(2)}).`
     );
   }
+  if (!hasExactCurrencyAmount(insertedCoins, resolvedTier.fee)) {
+    throw new AuthValidationError(
+      `Exact payment is required: insert ₱${resolvedTier.fee.toFixed(
+        2
+      )}. Overpayment is not accepted.`
+    );
+  }
 
   if (actor) {
     const existingActive = await db
@@ -2778,14 +2898,51 @@ export async function coinWalkUpUnlockDb(params: {
   }
 
   const result = await db.transaction(async (tx) => {
-    if (actor) {
+    const lockedActorRows = await tx
+      .select()
+      .from(users)
+      .where(eq(users.uid, actor.uid))
+      .for('update');
+    const lockedActor = lockedActorRows[0];
+    if (!lockedActor) {
+      throw new AuthValidationError('Authenticated account not found.');
+    }
+
+    const activeSession = await tx
+      .select({ slotNumber: sessions.slotNumber })
+      .from(sessions)
+      .where(and(eq(sessions.userUid, lockedActor.uid), eq(sessions.status, 'active')))
+      .limit(1);
+    if (activeSession[0]) {
+      throw new AuthValidationError(
+        `${lockedActor.name} already has an active session on ${formatCompartmentLabel(
+          activeSession[0].slotNumber
+        )}. Retrieve it first before opening another compartment.`
+      );
+    }
+
+    const activePinRows = await tx
+      .select({ qrVerificationCode: sessions.qrVerificationCode })
+      .from(sessions)
+      .where(and(eq(sessions.stationId, targetStation.id), eq(sessions.status, 'active')));
+    if (
+      activePinRows.some((row) =>
+        (row.qrVerificationCode || '').includes(`PIN-${cleanCustomPin}`)
+      )
+    ) {
+      throw new AuthValidationError(
+        'That 6-digit PIN is currently used by another active compartment. Please choose a different 6-digit PIN.'
+      );
+    }
+
+    {
       // Release any prior unused pending reservation owned by signed-in student
       const priorTokens = await tx
         .update(lockerUnlockTokens)
         .set({ used: true })
         .where(
           and(
-            eq(lockerUnlockTokens.userUid, actor.uid),
+            eq(lockerUnlockTokens.userUid, lockedActor.uid),
             eq(lockerUnlockTokens.used, false)
           )
         )
@@ -2852,30 +3009,24 @@ export async function coinWalkUpUnlockDb(params: {
       );
     }
 
-    const excessCoins = Math.max(0, +(insertedCoins - resolvedTier.fee).toFixed(2));
-    const coinChangeCredited = actor ? excessCoins : 0;
-    const coinChangeDispensed = actor ? 0 : excessCoins;
+    let updatedOwner = lockedActor;
 
-    let updatedOwner = actor;
-    if (actor && coinChangeCredited > 0) {
-      const nextBalance = Number(actor.walletBalance ?? 0) + coinChangeCredited;
-      const savedOwner = await tx
-        .update(users)
-        .set({ walletBalance: nextBalance })
-        .where(eq(users.uid, actor.uid))
-        .returning();
-      updatedOwner = savedOwner[0];
-    }
-
-    await tx
+    const claimedSlot = await tx
       .update(lockerSlots)
       .set({ status: 'in_use', isDoorOpen: true, isLocked: false })
       .where(
         and(
           eq(lockerSlots.stationId, targetStation.id),
-          eq(lockerSlots.slotNumber, slotNumber)
+          eq(lockerSlots.slotNumber, slotNumber),
+          eq(lockerSlots.status, 'available')
         )
+      )
+      .returning({ id: lockerSlots.id });
+    if (!claimedSlot[0]) {
+      throw new AuthValidationError(
+        `${formatCompartmentLabel(slotNumber)} is no longer available. Please choose another FREE compartment.`
       );
+    }
 
     const retrievalPin = cleanCustomPin;
     const coinTxId = `COIN-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
@@ -2944,26 +3095,14 @@ export async function coinWalkUpUnlockDb(params: {
         balanceAfter: ownerBalanceAfter,
       });
 
-      if (coinChangeCredited > 0) {
-        await recordWalletTransaction(tx, {
-          userUid: actor.uid,
-          kind: 'coin_change',
-          paymentSource: 'coin_change',
-          title: `Coin Overpayment Change (${slotLabel})`,
-          referenceCode: sessionId,
-          amount: coinChangeCredited,
-          walletDelta: coinChangeCredited,
-          balanceAfter: ownerBalanceAfter,
-        });
-      }
     }
 
     return {
       updatedOwner,
       newSession,
       retrievalPin,
-      coinChangeCredited,
-      coinChangeDispensed,
+      coinChangeCredited: 0,
+      coinChangeDispensed: 0,
     };
   });
 
@@ -2971,13 +3110,6 @@ export async function coinWalkUpUnlockDb(params: {
     fetchStationsWithSlots(),
     actor ? fetchWalletTransactionsDb(actor.uid) : Promise.resolve([]),
   ]);
-  const changeSuffix =
-    result.coinChangeCredited > 0 && actor
-      ? ` Change ₱${result.coinChangeCredited.toFixed(2)} credited to ${actor.name}'s E-Wallet.`
-      : result.coinChangeDispensed > 0
-      ? ` Coin change dispensed: ₱${result.coinChangeDispensed.toFixed(2)}.`
-      : '';
-
   return {
     user: result.updatedOwner ? mapUserRow(result.updatedOwner) : null,
     ownerUid: actor.uid,
@@ -2988,9 +3120,9 @@ export async function coinWalkUpUnlockDb(params: {
     retrievalPin: result.retrievalPin,
     coinChangeCredited: result.coinChangeCredited,
     coinChangeDispensed: result.coinChangeDispensed,
-    message: `Coins Accepted (₱${resolvedTier.fee.toFixed(2)})! ${formatCompartmentLabel(
+    message: `Exact coin payment accepted (₱${resolvedTier.fee.toFixed(2)})! ${formatCompartmentLabel(
       slotNumber
-    )} unlatched${actor ? ` for ${actor.name}` : ''}. Place phone inside & close door — enter your PIN ${result.retrievalPin} later to retrieve.${changeSuffix}`,
+    )} unlatched for ${actor.name}. Place phone inside & close door — enter your PIN ${result.retrievalPin} later to retrieve.`,
   };
 }
 
@@ -3129,83 +3261,127 @@ export async function startSessionDb(params: {
   deductWalletAmount: number;
 }): Promise<{ user: UserAccount; session: ActiveSession; stations: KioskStation[] }> {
   try {
-    const existingUser = await db.select().from(users).where(eq(users.uid, params.uid));
-    if (!existingUser[0]) {
-      throw new AuthValidationError('User account not found.');
-    }
-    if (existingUser[0].role === 'admin') {
-      throw new AuthValidationError('Admin accounts cannot start student locker sessions.');
-    }
-    const existingActive = await db
-      .select({ slotNumber: sessions.slotNumber })
-      .from(sessions)
-      .where(and(eq(sessions.userUid, params.uid), eq(sessions.status, 'active')))
-      .limit(1);
-    if (existingActive[0]) {
-      throw new AuthValidationError(
-        `You already have an active session in ${formatCompartmentLabel(
-          existingActive[0].slotNumber
-        )}. Retrieve your item and end it first.`
-      );
-    }
-
-    const resolvedTier = resolvePricingTier({
-      tierId: params.session.pricingTier,
-      serviceType: params.session.serviceType,
-      durationMinutes: params.session.durationMinutes,
-      slotNumber: params.session.slotNumber,
-    });
-
-    let finalUser = existingUser[0];
-    if (params.deductWalletAmount > 0) {
-      const feeToDeduct = resolvedTier.fee;
-      const nextBalance = Math.max(
-        0,
-        Number(existingUser[0].walletBalance) - feeToDeduct
-      );
-      const updatedUser = await db
-        .update(users)
-        .set({ walletBalance: nextBalance })
+    const result = await db.transaction(async (tx) => {
+      const userRows = await tx
+        .select()
+        .from(users)
         .where(eq(users.uid, params.uid))
-        .returning();
-      finalUser = updatedUser[0];
-    }
+        .for('update');
+      const existingUser = userRows[0];
+      if (!existingUser) {
+        throw new AuthValidationError('User account not found.');
+      }
+      if (existingUser.role === 'admin') {
+        throw new AuthValidationError('Admin accounts cannot start student locker sessions.');
+      }
 
-    await db
-      .update(lockerSlots)
-      .set({ status: 'in_use', isDoorOpen: true, isLocked: false })
-      .where(
-        and(
-          eq(lockerSlots.stationId, params.session.stationId),
-          eq(lockerSlots.slotNumber, params.session.slotNumber)
+      const existingActive = await tx
+        .select({ slotNumber: sessions.slotNumber })
+        .from(sessions)
+        .where(and(eq(sessions.userUid, params.uid), eq(sessions.status, 'active')))
+        .limit(1);
+      if (existingActive[0]) {
+        throw new AuthValidationError(
+          `You already have an active session in ${formatCompartmentLabel(
+            existingActive[0].slotNumber
+          )}. Retrieve your item and end it first.`
+        );
+      }
+
+      if (!Number.isFinite(params.deductWalletAmount) || params.deductWalletAmount < 0) {
+        throw new AuthValidationError('Invalid wallet payment amount.');
+      }
+
+      const resolvedTier = resolvePricingTier({
+        tierId: params.session.pricingTier,
+        serviceType: params.session.serviceType,
+        durationMinutes: params.session.durationMinutes,
+        slotNumber: params.session.slotNumber,
+      });
+
+      let finalUser = existingUser;
+      if (params.deductWalletAmount > 0) {
+        if (!hasExactCurrencyAmount(params.deductWalletAmount, resolvedTier.fee)) {
+          throw new AuthValidationError('Wallet payment does not match the session fee.');
+        }
+        const currentBalance = Number(existingUser.walletBalance);
+        if (currentBalance < resolvedTier.fee) {
+          throw new AuthValidationError(
+            `Insufficient campus e-wallet balance (₱${currentBalance.toFixed(2)}).`
+          );
+        }
+        const updatedUser = await tx
+          .update(users)
+          .set({ walletBalance: currentBalance - resolvedTier.fee })
+          .where(eq(users.uid, params.uid))
+          .returning();
+        finalUser = updatedUser[0];
+      }
+
+      const slotRows = await tx
+        .select()
+        .from(lockerSlots)
+        .where(
+          and(
+            eq(lockerSlots.stationId, params.session.stationId),
+            eq(lockerSlots.slotNumber, params.session.slotNumber)
+          )
+        );
+      if (!slotRows[0] || slotRows[0].status !== 'available') {
+        throw new AuthValidationError(
+          `${formatCompartmentLabel(params.session.slotNumber)} is no longer available.`
+        );
+      }
+
+      const claimedSlot = await tx
+        .update(lockerSlots)
+        .set({ status: 'in_use', isDoorOpen: true, isLocked: false })
+        .where(
+          and(
+            eq(lockerSlots.stationId, params.session.stationId),
+            eq(lockerSlots.slotNumber, params.session.slotNumber),
+            eq(lockerSlots.status, 'available')
+          )
         )
-      );
+        .returning({ id: lockerSlots.id });
+      if (!claimedSlot[0]) {
+        throw new AuthValidationError(
+          `${formatCompartmentLabel(params.session.slotNumber)} is no longer available.`
+        );
+      }
 
-    await db.insert(sessions).values({
-      sessionId: params.session.sessionId,
-      userUid: params.uid,
-      stationId: params.session.stationId,
-      stationName: params.session.stationName,
-      building: params.session.building,
-      slotNumber: params.session.slotNumber,
-      serviceType: resolvedTier.serviceType,
-      compartmentSize: resolvedTier.name,
-      startTimeMs: params.session.startTime,
-      durationMinutes: resolvedTier.durationMinutes,
-      remainingSeconds: resolvedTier.durationMinutes * 60,
-      totalFee: resolvedTier.fee,
-      batteryInitial: params.session.batteryInitial,
-      batteryCurrent: params.session.batteryCurrent,
-      chargingRateWatts: resolvedTier.serviceType === 'storage' ? 0 : params.session.chargingRateWatts,
-      lockerTemperature: params.session.lockerTemperature,
-      isOverchargeProtectionActive: params.session.isOverchargeProtectionActive,
-      isTamperAlertArmed: params.session.isTamperAlertArmed,
-      status: 'active',
-      qrVerificationCode: params.session.qrVerificationCode,
+      await tx.insert(sessions).values({
+        sessionId: params.session.sessionId,
+        userUid: params.uid,
+        stationId: params.session.stationId,
+        stationName: params.session.stationName,
+        building: params.session.building,
+        slotNumber: params.session.slotNumber,
+        serviceType: resolvedTier.serviceType,
+        compartmentSize: resolvedTier.name,
+        startTimeMs: params.session.startTime,
+        durationMinutes: resolvedTier.durationMinutes,
+        remainingSeconds: resolvedTier.durationMinutes * 60,
+        totalFee: resolvedTier.fee,
+        batteryInitial: params.session.batteryInitial,
+        batteryCurrent: params.session.batteryCurrent,
+        chargingRateWatts:
+          resolvedTier.serviceType === 'storage' ? 0 : params.session.chargingRateWatts,
+        lockerTemperature: params.session.lockerTemperature,
+        isOverchargeProtectionActive: params.session.isOverchargeProtectionActive,
+        isTamperAlertArmed: params.session.isTamperAlertArmed,
+        status: 'active',
+        qrVerificationCode: params.session.qrVerificationCode,
+      });
+
+      return { user: finalUser };
     });
-
     const updatedStations = await fetchStationsWithSlots();
-    return { user: mapUserRow(finalUser), session: params.session, stations: updatedStations };
+    return {
+      user: mapUserRow(result.user),
+      session: params.session,
+      stations: updatedStations,
+    };
   } catch (error) {
     if (error instanceof AuthValidationError) throw error;
     console.error('Database start session failed:', error);

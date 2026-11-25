@@ -33,8 +33,12 @@ import {
   getDefaultTierForService,
   resolvePricingTier,
 } from '../constants/pricing';
+import { RETIRED_DEMO_USER_UID } from '../constants/seededAccounts';
 import { sound } from '../utils/audio';
-import { formatSessionDateTime } from '../utils/format';
+import {
+  formatSessionDateTime,
+  getRemainingSessionSeconds,
+} from '../utils/format';
 import {
   createFirestoreNotification,
   deleteFirestoreNotification,
@@ -190,7 +194,7 @@ interface UniChargeContextType {
   unlockStationViaQr: (
     qrCode: string,
     paymentMethod: PaymentMethod
-  ) => { success: boolean; message: string };
+  ) => Promise<{ success: boolean; message: string }>;
   endActiveSession: () => { success: boolean; message: string };
   topUpWallet: (
     amount: number,
@@ -267,6 +271,12 @@ function writeStorage<T>(key: string, value: T): void {
   }
 }
 
+function loadUsers(): UserAccount[] {
+  return readStorage<UserAccount[]>(STORAGE_KEYS.users, SEEDED_USERS).filter(
+    (user) => user.id !== RETIRED_DEMO_USER_UID
+  );
+}
+
 function normalizePath(rawPath: string): AppRoute {
   const cleaned = rawPath.replace(/^#/, '');
   if (cleaned === '/signup') return '/signup';
@@ -298,13 +308,11 @@ function syncBrowserUrl(route: AppRoute, replace = false): void {
 }
 
 export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [users, setUsers] = useState<UserAccount[]>(() =>
-    readStorage<UserAccount[]>(STORAGE_KEYS.users, SEEDED_USERS)
-  );
+  const [users, setUsers] = useState<UserAccount[]>(loadUsers);
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => {
     const savedId = readStorage<string | null>(STORAGE_KEYS.currentUserId, null);
-    if (!savedId) return null;
-    const savedUsers = readStorage<UserAccount[]>(STORAGE_KEYS.users, SEEDED_USERS);
+    if (!savedId || savedId === RETIRED_DEMO_USER_UID) return null;
+    const savedUsers = loadUsers();
     return savedUsers.find((u) => u.id === savedId) ?? null;
   });
   const [currentRoute, setCurrentRoute] = useState<AppRoute>(() => getCurrentBrowserRoute());
@@ -366,14 +374,23 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   // Auth token held strictly in memory (never localStorage)
   const idTokenRef = useRef<string | null>(null);
   const isBackendSessionRef = useRef<boolean>(false);
+  const logoutInProgressRef = useRef(false);
+  const authGenerationRef = useRef(0);
 
   const authorizedFetch = useCallback(async (url: string, init: RequestInit = {}) => {
+    const authGeneration = authGenerationRef.current;
     const fbUser = auth.currentUser;
     let token = idTokenRef.current;
     if (!token?.startsWith('uc_') && fbUser) {
       token = await fbUser.getIdToken();
     }
-    if (!token) return null;
+    if (
+      !token ||
+      !isBackendSessionRef.current ||
+      authGeneration !== authGenerationRef.current
+    ) {
+      return null;
+    }
     idTokenRef.current = token;
     const res = await fetch(url, {
       ...init,
@@ -391,13 +408,16 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }, []);
 
   const publicKioskFetch = useCallback(async (url: string, init: RequestInit = {}) => {
+    const authGeneration = authGenerationRef.current;
     const fbUser = auth.currentUser;
     let token = idTokenRef.current;
     if (!token?.startsWith('uc_') && fbUser) {
       token = await fbUser.getIdToken();
     }
-    if (token) {
+    if (token && authGeneration === authGenerationRef.current) {
       idTokenRef.current = token;
+    } else if (authGeneration !== authGenerationRef.current) {
+      token = null;
     }
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -476,9 +496,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   );
 
   const hydrateFromBackend = useCallback(
-    async (token: string): Promise<UserAccount> => {
-      idTokenRef.current = token;
-      isBackendSessionRef.current = true;
+    async (token: string, expectedAuthGeneration?: number): Promise<UserAccount> => {
       const res = await fetch('/api/bootstrap', {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -489,6 +507,15 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         throw new Error(errBody.error || 'Failed to load account from server');
       }
       const data = await res.json();
+      if (
+        expectedAuthGeneration !== undefined &&
+        (expectedAuthGeneration !== authGenerationRef.current ||
+          logoutInProgressRef.current)
+      ) {
+        throw new Error('Sign-in was cancelled.');
+      }
+      idTokenRef.current = token;
+      isBackendSessionRef.current = true;
       return applyBootstrapPayload(data);
     },
     [applyBootstrapPayload]
@@ -496,12 +523,23 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      if (logoutInProgressRef.current) {
+        if (!fbUser) logoutInProgressRef.current = false;
+        return;
+      }
       if (fbUser) {
+        const authGeneration = authGenerationRef.current;
         setFirebaseAuthUser({ uid: fbUser.uid, emailVerified: fbUser.emailVerified });
         if (idTokenRef.current?.startsWith('uc_')) return;
         try {
           const token = await fbUser.getIdToken();
-          await hydrateFromBackend(token);
+          if (
+            logoutInProgressRef.current ||
+            authGeneration !== authGenerationRef.current
+          ) {
+            return;
+          }
+          await hydrateFromBackend(token, authGeneration);
         } catch (err) {
           console.error('Failed to restore authenticated session:', err);
         }
@@ -542,10 +580,17 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const syncStationState = useCallback(async () => {
     if (!isBackendSessionRef.current || syncInFlightRef.current) return;
+    const authGeneration = authGenerationRef.current;
     syncInFlightRef.current = true;
     try {
       const data = await authorizedFetch('/api/station/sync');
-      if (!data) return;
+      if (
+        !data ||
+        !isBackendSessionRef.current ||
+        authGeneration !== authGenerationRef.current
+      ) {
+        return;
+      }
       if (Array.isArray(data.stations) && data.stations.length > 0) {
         const nextStations = data.stations as KioskStation[];
         setStations(nextStations);
@@ -721,7 +766,18 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }, [isFirestoreLive, firebaseAuthUser]);
 
   const student = currentUser ?? INITIAL_STUDENT;
-  const activeSession = currentUser ? (sessionsByUserId[currentUser.id] ?? null) : null;
+  const storedActiveSession = currentUser
+    ? (sessionsByUserId[currentUser.id] ?? null)
+    : null;
+  const activeSession = storedActiveSession
+    ? {
+        ...storedActiveSession,
+        remainingSeconds: getRemainingSessionSeconds(
+          storedActiveSession.startTime,
+          storedActiveSession.durationMinutes
+        ),
+      }
+    : null;
   const sessionHistory = currentUser ? (historyByUserId[currentUser.id] ?? []) : [];
   const walletTransactions = currentUser ? (walletTxByUserId[currentUser.id] ?? []) : [];
 
@@ -877,8 +933,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setSessionsByUserId((prevMap) => {
         const prev = prevMap[uid];
         if (!prev || prev.status !== 'active') return prevMap;
-        const newRemaining = Math.max(0, prev.remainingSeconds - 1);
-        const elapsedSeconds = prev.durationMinutes * 60 - newRemaining;
+        const newRemaining = getRemainingSessionSeconds(
+          prev.startTime,
+          prev.durationMinutes
+        );
+        if (prev.remainingSeconds === newRemaining) return prevMap;
+        const elapsedSeconds = Math.max(0, prev.durationMinutes * 60 - newRemaining);
         const simulatedCurrentBattery = Math.min(
           100,
           Math.floor(prev.batteryInitial + elapsedSeconds / 30)
@@ -957,6 +1017,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     password: string
   ): Promise<AuthResult> => {
     sound.playTap();
+    const authGeneration = authGenerationRef.current;
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
@@ -970,6 +1031,10 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           error: data.error || 'Invalid email/ID or password',
         };
       }
+      if (authGeneration !== authGenerationRef.current) {
+        return { success: false, error: 'Sign-in was cancelled.' };
+      }
+      authGenerationRef.current += 1;
       idTokenRef.current = data.token;
       isBackendSessionRef.current = true;
       const loadedUser = applyBootstrapPayload(data);
@@ -989,10 +1054,30 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const loginWithGoogle = async (): Promise<AuthResult> => {
     sound.playTap();
+    const startingAuthGeneration = authGenerationRef.current;
     try {
       const credential = await signInWithPopup(auth, googleAuthProvider);
+      if (startingAuthGeneration !== authGenerationRef.current) {
+        logoutInProgressRef.current = true;
+        authGenerationRef.current += 1;
+        try {
+          await signOut(auth);
+        } catch (error: unknown) {
+          console.error('Cancelled Google sign-in could not be signed out:', error);
+        } finally {
+          if (!auth.currentUser) logoutInProgressRef.current = false;
+        }
+        return { success: false, error: 'Sign-in was cancelled.' };
+      }
+      authGenerationRef.current += 1;
+      logoutInProgressRef.current = false;
+      setFirebaseAuthUser({
+        uid: credential.user.uid,
+        emailVerified: credential.user.emailVerified,
+      });
+      const loginGeneration = authGenerationRef.current;
       const token = await credential.user.getIdToken();
-      const loadedUser = await hydrateFromBackend(token);
+      const loadedUser = await hydrateFromBackend(token, loginGeneration);
       setAccessDeniedMessage(null);
       setAuthSuccessMessage(null);
       const destination: AppRoute =
@@ -1290,6 +1375,8 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const logout = () => {
     sound.playTap();
+    logoutInProgressRef.current = true;
+    authGenerationRef.current += 1;
     setAccessDeniedMessage(null);
     setAuthSuccessMessage(null);
     setPendingUnlockToken(null);
@@ -1300,10 +1387,19 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     notifiedChargeSessionsRef.current.clear();
     idTokenRef.current = null;
     isBackendSessionRef.current = false;
-    signOut(auth).catch(() => {});
+    signOut(auth)
+      .catch((error: unknown) => {
+        console.error('Firebase sign-out failed:', error);
+      })
+      .finally(() => {
+        if (!auth.currentUser) logoutInProgressRef.current = false;
+      });
     setCurrentUser(null);
     setCurrentRoute('/login');
-    syncBrowserUrl('/login', false);
+    syncBrowserUrl('/login', true);
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(STORAGE_KEYS.currentUserId);
+    }
   };
 
   const updateCurrentUserState = (updater: (user: UserAccount) => UserAccount) => {
@@ -1797,6 +1893,15 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       };
     }
 
+    if (activeSession?.status === 'active') {
+      return {
+        success: false,
+        message: `You already have an active session in ${formatCompartmentLabel(
+          activeSession.slotNumber
+        )}. Retrieve your item and end your session before opening another compartment.`,
+      };
+    }
+
     if (pendingUnlockToken.paymentMethod === 'cash') {
       const inserted = Number(coinInsertedAmount ?? 0);
       if (inserted < pendingUnlockToken.totalFee) {
@@ -1811,9 +1916,13 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           )}.`,
         };
       }
-      const change = Math.max(0, +(inserted - pendingUnlockToken.totalFee).toFixed(2));
-      if (change > 0) {
-        updateCurrentUserState((u) => ({ ...u, walletBalance: u.walletBalance + change }));
+      if (inserted !== pendingUnlockToken.totalFee) {
+        return {
+          success: false,
+          message: `Exact payment is required: insert ₱${pendingUnlockToken.totalFee.toFixed(
+            2
+          )}. Overpayment is not accepted.`,
+        };
       }
     } else if (pendingUnlockToken.paymentMethod === 'wallet') {
       if (student.walletBalance < pendingUnlockToken.totalFee) {
@@ -2045,10 +2154,18 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       serviceType: params.serviceType,
       slotNumber: params.slotNumber,
     });
-    if (params.coinInsertedAmount < tier.fee) {
+    if (!Number.isFinite(params.coinInsertedAmount) || params.coinInsertedAmount < tier.fee) {
       return {
         success: false,
         message: `Insert at least ₱${tier.fee.toFixed(2)} in coins for ${tier.name}.`,
+      };
+    }
+    if (params.coinInsertedAmount !== tier.fee) {
+      return {
+        success: false,
+        message: `Exact payment is required: insert ₱${tier.fee.toFixed(
+          2
+        )}. Overpayment is not accepted.`,
       };
     }
 
@@ -2059,11 +2176,6 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         success: false,
         message: `${formatCompartmentLabel(params.slotNumber)} is not available.`,
       };
-    }
-
-    const change = Math.max(0, +(params.coinInsertedAmount - tier.fee).toFixed(2));
-    if (change > 0 && currentUser) {
-      updateCurrentUserState((u) => ({ ...u, walletBalance: u.walletBalance + change }));
     }
 
     const retrievalPin = cleanCustomPin;
@@ -2129,27 +2241,30 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     return {
       success: true,
       retrievalPin,
-      coinChangeCredited: currentUser ? change : 0,
-      coinChangeDispensed: currentUser ? 0 : change,
+      coinChangeCredited: 0,
+      coinChangeDispensed: 0,
       session: newSession,
-      message: `Coins Accepted (₱${tier.fee.toFixed(2)})! ${formatCompartmentLabel(
+      message: `Exact payment accepted (₱${tier.fee.toFixed(2)})! ${formatCompartmentLabel(
         params.slotNumber
-      )} unlatched. Retrieval PIN: ${retrievalPin}.${
-        change > 0
-          ? currentUser
-            ? ` Change ₱${change.toFixed(2)} credited to Campus E-Wallet.`
-            : ` Coin change dispensed: ₱${change.toFixed(2)}.`
-          : ''
-      }`,
+      )} unlatched. Retrieval PIN: ${retrievalPin}.`,
     };
   };
 
   // Used by the Expo Mobile Companion camera QR scanner screen (the phone scanning the kiosk's display QR)
-  const unlockStationViaQr = (
+  const unlockStationViaQr = async (
     qrCode: string,
     paymentMethod: PaymentMethod
-  ): { success: boolean; message: string } => {
+  ): Promise<{ success: boolean; message: string }> => {
     sound.playBeep();
+
+    if (activeSession?.status === 'active') {
+      return {
+        success: false,
+        message: `You already have an active session in ${formatCompartmentLabel(
+          activeSession.slotNumber
+        )}. Retrieve your item and end your session before availing another compartment.`,
+      };
+    }
 
     const slotToBook =
       (selectedSlot &&
@@ -2159,8 +2274,13 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         : null) ||
       selectedStation.slots.find(
         (s) => s.status === 'available' && s.category === selectedService
-      ) ||
-      selectedStation.slots[0];
+      );
+    if (!slotToBook) {
+      return {
+        success: false,
+        message: `No free ${selectedService} compartments are available.`,
+      };
+    }
     const activeTier =
       selectedTier.serviceType === selectedService
         ? selectedTier
@@ -2176,34 +2296,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           )}). Please top up or choose GCash/Maya.`,
         };
       }
-      updateCurrentUserState((u) => ({ ...u, walletBalance: u.walletBalance - fee }));
     }
 
-    sound.playSolenoidRelease();
-    setTimeout(() => {
-      sound.playChargingConnected();
-    }, 450);
-
-    setStations((prevStations) =>
-      prevStations.map((st) => {
-        if (st.id === selectedStation.id) {
-          const updatedSlots = st.slots.map((s) =>
-            s.slotNumber === slotToBook.slotNumber
-              ? { ...s, status: 'in_use' as const, isDoorOpen: true, isLocked: false }
-              : s
-          );
-          const availableCount = updatedSlots.filter((s) => s.status === 'available').length;
-          return { ...st, slots: updatedSlots, availableSlots: availableCount };
-        }
-        return st;
-      })
-    );
-
-    setHardwareKioskStationId(selectedStation.id);
-    setIsKioskDoorOpen(true);
-    setActiveKioskSlotReleased(slotToBook.slotNumber);
-
-    const newSession: ActiveSession = {
+    let newSession: ActiveSession = {
       sessionId: `USTP-SES-${Math.floor(10000 + Math.random() * 90000)}`,
       stationId: selectedStation.id,
       stationName: selectedStation.name,
@@ -2227,28 +2322,68 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         `${selectedStation.campusCode}-SLOT${formatCompartmentCode(slotToBook.slotNumber)}-AUTH`,
     };
 
-    setActiveSessionForCurrentUser(newSession);
-
     if (isBackendSessionRef.current) {
-      authorizedFetch('/api/sessions/start', {
-        method: 'POST',
-        body: JSON.stringify({
-          session: newSession,
-          deductWalletAmount: paymentMethod === 'wallet' ? fee : 0,
-        }),
-      })
-        .then((data) => {
-          if (Array.isArray(data?.stations) && data.stations.length > 0) {
-            const nextStations = data.stations as KioskStation[];
-            setStations(nextStations);
-            setSelectedStation(
-              (prev) => nextStations.find((s) => s.id === prev.id) || nextStations[0]
-            );
-          }
-          notifyStationSync();
-        })
-        .catch((err) => console.error('QR session sync failed:', err));
+      try {
+        const data = await authorizedFetch('/api/sessions/start', {
+          method: 'POST',
+          body: JSON.stringify({
+            session: newSession,
+            deductWalletAmount: paymentMethod === 'wallet' ? fee : 0,
+          }),
+        });
+        if (data?.session) newSession = data.session as ActiveSession;
+        if (data?.user) {
+          const updatedUser = data.user as UserAccount;
+          setCurrentUser(updatedUser);
+          setUsers((prev) =>
+            prev.map((user) => (user.id === updatedUser.id ? updatedUser : user))
+          );
+        }
+        if (Array.isArray(data?.stations) && data.stations.length > 0) {
+          const nextStations = data.stations as KioskStation[];
+          setStations(nextStations);
+          setSelectedStation(
+            (prev) => nextStations.find((station) => station.id === prev.id) || nextStations[0]
+          );
+        }
+      } catch (error: unknown) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'Unable to start locker session.',
+        };
+      }
+    } else if (paymentMethod === 'wallet') {
+      updateCurrentUserState((user) => ({ ...user, walletBalance: user.walletBalance - fee }));
     }
+
+    sound.playSolenoidRelease();
+    setTimeout(() => {
+      sound.playChargingConnected();
+    }, 450);
+
+    if (!isBackendSessionRef.current) {
+      setStations((prevStations) =>
+        prevStations.map((station) => {
+          if (station.id !== selectedStation.id) return station;
+          const updatedSlots = station.slots.map((slot) =>
+            slot.slotNumber === slotToBook.slotNumber
+              ? { ...slot, status: 'in_use' as const, isDoorOpen: true, isLocked: false }
+              : slot
+          );
+          return {
+            ...station,
+            slots: updatedSlots,
+            availableSlots: updatedSlots.filter((slot) => slot.status === 'available').length,
+          };
+        })
+      );
+    }
+
+    setHardwareKioskStationId(selectedStation.id);
+    setIsKioskDoorOpen(true);
+    setActiveKioskSlotReleased(slotToBook.slotNumber);
+    setActiveSessionForCurrentUser(newSession);
+    notifyStationSync();
 
     confetti({
       particleCount: 50,

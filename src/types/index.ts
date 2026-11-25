@@ -202,7 +202,7 @@ export interface DashboardNotification {
 
 export interface AdminStationTransaction {
   id: string;
-  kind: 'reserved' | 'active' | 'completed';
+  kind: 'reserved' | 'active' | 'expired' | 'completed';
   userUid: string | null;
   userName: string;
   studentIdNumber: string;
@@ -213,6 +213,7 @@ export interface AdminStationTransaction {
   paymentMethod?: string;
   createdAtMs: number;
   expiresAtMs?: number;
+  remainingSeconds?: number;
 }
 
 export interface AdminStationActivity {

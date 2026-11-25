@@ -105,9 +105,9 @@ export const PortalLayout: React.FC = () => {
     icon: React.ComponentType<{ className?: string }>;
     badge?: string | number;
   }[] = [
-    { id: 'overview', label: 'Fleet Dashboard', icon: LayoutDashboard },
+    { id: 'overview', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'hardware', label: 'Kiosk Hardware', icon: Cpu },
-    { id: 'users', label: 'Users & RBAC', icon: Users },
+    { id: 'users', label: 'Users', icon: Users },
     {
       id: 'alerts',
       label: 'Security & Logs',

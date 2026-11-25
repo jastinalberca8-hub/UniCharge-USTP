@@ -135,23 +135,6 @@ export const SEEDED_USERS: UserAccount[] = [
     preferredPayment: 'wallet',
     createdAt: '2026-01-10',
   },
-  {
-    id: 'usr_ustp_202210481',
-    name: 'Marco Villanueva',
-    studentIdNumber: '2022-10481',
-    email: 'm.villanueva@ustp.edu.ph',
-    password: 'student123',
-    role: 'student',
-    college: 'College of Engineering and Architecture (CEA)',
-    degree: 'BS Electrical Engineering',
-    avatar: '',
-    walletBalance: 280.0,
-    biometricEnabled: false,
-    pushNotifications: true,
-    overchargeAlerts: true,
-    preferredPayment: 'gcash',
-    createdAt: '2026-09-02',
-  },
 ];
 
 export const INITIAL_STUDENT: UserAccount = SEEDED_USERS[0];

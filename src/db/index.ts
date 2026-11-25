@@ -10,8 +10,10 @@ export const createPool = () => {
   if (!global._postgresPool) {
     const sqlHost = process.env.SQL_HOST || '';
     const isUnixSocket = sqlHost.startsWith('/');
+    const isLocalHost = sqlHost === 'localhost' || sqlHost === '127.0.0.1';
+    const preferLocalHost = !process.env.VERCEL && isLocalHost;
     const connectionString =
-      !isUnixSocket
+      !isUnixSocket && !preferLocalHost
         ? (process.env.DATABASE_URL || process.env.POSTGRES_URL || '').trim()
         : '';
     const maxConnections = process.env.VERCEL ? 3 : 10;
@@ -35,7 +37,6 @@ export const createPool = () => {
         allowExitOnIdle: true,
       });
     } else {
-      const isLocalHost = sqlHost === 'localhost' || sqlHost === '127.0.0.1';
       const useSsl =
         !isUnixSocket &&
         (process.env.SQL_SSL === 'true' || (!isLocalHost && process.env.SQL_SSL !== 'false'));

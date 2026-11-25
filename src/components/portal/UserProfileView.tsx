@@ -134,7 +134,7 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({ onBackToDashbo
             className="text-xs font-semibold text-[#4E6E81] hover:text-[#5BC496] inline-flex items-center gap-1 mb-1.5 cursor-pointer transition-colors"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
-            <span>Back to {isAdmin ? 'Fleet Dashboard' : 'Dashboard'}</span>
+            <span>Back to Dashboard</span>
           </button>
           <h1 className="text-2xl font-bold text-[#4E6E81] tracking-tight">
             My Profile &amp; Account Status

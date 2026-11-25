@@ -1,31 +1,33 @@
 import React, { useState } from 'react';
-import QRCode from 'qrcode';
 import { useUniCharge } from '../../context/UniChargeContext';
 import {
   CHARGING_SLOT_COUNT,
   STORAGE_SLOT_COUNT,
   TOTAL_COMPARTMENT_COUNT,
-  formatCompartmentCode,
   formatCompartmentLabel,
   getTiersForService,
 } from '../../constants/pricing';
 import { sound } from '../../utils/audio';
 import { formatDuration, formatSessionTimer } from '../../utils/format';
-import { LockerSlot, PaymentMethod, ServiceType, SessionHistoryItem, WalletTransaction } from '../../types';
+import {
+  BookingPaymentMethod,
+  LockerSlot,
+  PaymentMethod,
+  ServiceType,
+  SessionHistoryItem,
+  WalletTransaction,
+} from '../../types';
 import {
   Zap,
   BatteryCharging,
   Clock,
   Lock,
   Unlock,
-  Plus,
   QrCode,
   ShieldCheck,
   CheckCircle2,
   ArrowRight,
   Package,
-  Power,
-  Fingerprint,
   Bell,
   PhoneCall,
   Download,
@@ -144,22 +146,15 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
     walletTransactions,
     generateUnlockToken,
     regenerateUnlockToken,
-    resendUnlockQrEmail,
+    resendUnlockPinEmail,
     cancelPendingUnlock,
     endActiveSession,
     topUpWallet,
-    toggleBiometrics,
     togglePushNotifications,
     toggleOverchargeProtection,
-    triggerSimulatedTamper,
-    simulateFullCharge,
-    triggerUnexpectedDoorOpen,
-    notifications,
-    isFirestoreLive,
-    markNotificationRead,
   } = useUniCharge();
 
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('wallet');
+  const [paymentMethod, setPaymentMethod] = useState<BookingPaymentMethod>('gcash');
   const [selectedTopUpPlatform, setSelectedTopUpPlatform] =
     useState<OnlineEpaymentPlatform>('gcash');
   const [customTopUpAmount, setCustomTopUpAmount] = useState<string>('150');
@@ -174,7 +169,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
   const [walletFilter, setWalletFilter] = useState<'all' | 'ewallet' | 'coin'>('all');
   const [bookingMessage, setBookingMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isGeneratingQr, setIsGeneratingQr] = useState(false);
-  const [isResendingQrEmail, setIsResendingQrEmail] = useState(false);
+  const [isSendingUnlockPin, setIsSendingUnlockPin] = useState(false);
   const [resendStatusMessage, setResendStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showQrModal, setShowQrModal] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
@@ -365,41 +360,18 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
     }
   };
 
-  const handleResendQrEmail = async () => {
-    if (isResendingQrEmail) return;
-    setIsResendingQrEmail(true);
+  const handleEmailUnlockPin = async () => {
+    if (isSendingUnlockPin) return;
+    setIsSendingUnlockPin(true);
     setResendStatusMessage(null);
     try {
-      const res = await resendUnlockQrEmail();
+      const res = await resendUnlockPinEmail();
       setResendStatusMessage({
         type: res.success ? 'success' : 'error',
         text: res.message,
       });
     } finally {
-      setIsResendingQrEmail(false);
-    }
-  };
-
-  const handleDownloadQrPng = async () => {
-    if (!pendingUnlockToken) return;
-    sound.playTap();
-    try {
-      const dataUrl = await QRCode.toDataURL(pendingUnlockToken.qrPayload, {
-        width: 400,
-        margin: 4,
-        errorCorrectionLevel: 'M',
-        color: { dark: '#1E293B', light: '#FFFFFF' },
-      });
-      const link = document.createElement('a');
-      link.href = dataUrl;
-      link.download = `unicharge-${pendingUnlockToken.stationCode.toLowerCase()}-slot-${formatCompartmentCode(
-        pendingUnlockToken.slotNumber
-      )}.png`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    } catch (err) {
-      console.error('Failed to generate downloadable QR PNG:', err);
+      setIsSendingUnlockPin(false);
     }
   };
 
@@ -440,83 +412,6 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               </button>
             </div>
           </div>
-
-          {/* Real-Time Firestore Snapshot Dashboard Alerts */}
-          {notifications.filter((n) => !n.read).length > 0 && (
-            <div className="space-y-2.5">
-              {notifications
-                .filter((n) => !n.read)
-                .slice(0, 3)
-                .map((notif) => {
-                  const isCritical = notif.type === 'unexpected_door_open';
-                  return (
-                    <div
-                      key={notif.id}
-                      role="alert"
-                      className={`rounded-2xl border p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs ${
-                        isCritical
-                          ? 'bg-red-50 border-[#DC2626] text-[#1E293B]'
-                          : 'bg-[#EBF9F3] border-[#5BC496] text-[#1E293B]'
-                      }`}
-                    >
-                      <div className="flex items-start gap-3">
-                        <div
-                          className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                            isCritical ? 'bg-white text-[#DC2626]' : 'bg-white text-[#5BC496]'
-                          }`}
-                        >
-                          {isCritical ? (
-                            <AlertTriangle className="w-5 h-5" />
-                          ) : (
-                            <BatteryCharging className="w-5 h-5" />
-                          )}
-                        </div>
-                        <div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-xs font-bold text-[#1E293B]">
-                              {notif.title}
-                            </span>
-                            <span
-                              className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
-                                isCritical
-                                  ? 'bg-[#DC2626] text-white'
-                                  : 'bg-[#5BC496] text-[#1E293B]'
-                              }`}
-                            >
-                              {isFirestoreLive ? 'Firestore Live' : 'Live Alert'}
-                            </span>
-                          </div>
-                          <p className="text-xs text-[#334155] mt-0.5">{notif.message}</p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void markNotificationRead(notif.id);
-                            onChangeSection(isCritical ? 'kiosk' : 'sessions');
-                          }}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${
-                            isCritical
-                              ? 'bg-[#DC2626] text-white hover:bg-red-700'
-                              : 'bg-[#4E6E81] text-white hover:bg-[#3D5767]'
-                          }`}
-                        >
-                          {isCritical ? 'Inspect Kiosk' : 'Retrieve Device'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void markNotificationRead(notif.id)}
-                          className="px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E8F0] text-xs font-semibold text-[#64748B] hover:text-[#1E293B] cursor-pointer"
-                        >
-                          Dismiss
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-            </div>
-          )}
 
           {/* KPI Strip */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -664,25 +559,6 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                       className="h-10 px-3.5 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#4E6E81] hover:bg-[#EDF2F5] cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors"
                     >
                       <span>Open Full Telemetry</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void simulateFullCharge()}
-                      className="h-10 px-3.5 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/50 text-xs font-bold text-[#1E293B] hover:bg-[#5BC496]/20 cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors"
-                    >
-                      <span>Simulate 100%</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void triggerUnexpectedDoorOpen(
-                          activeSession.stationId,
-                          activeSession.slotNumber
-                        )
-                      }
-                      className="h-10 px-3.5 rounded-xl bg-red-50 border border-red-200 text-xs font-bold text-[#DC2626] hover:bg-red-100 cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors"
-                    >
-                      <span>Test Door Open</span>
                     </button>
                     <button
                       type="button"
@@ -1137,14 +1013,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                 {(
                   [
                     {
-                      id: 'wallet' as const,
-                      label: `Campus E-Wallet (₱${student.walletBalance.toFixed(2)})`,
-                      subtitle: 'Instant 1-scan wallet payment with zero surcharge',
-                    },
-                    {
                       id: 'gcash' as const,
                       label: 'GCash',
-                      subtitle: `Simulated GCash checkout · instant QR pass (₱${totalFee}.00)`,
+                      subtitle: `Simulated GCash checkout · instant unlock pass (₱${totalFee}.00)`,
                     },
                     {
                       id: 'maya' as const,
@@ -1159,7 +1030,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                     {
                       id: 'cash' as const,
                       label: `Kiosk Coin Slot (₱${totalFee}.00)`,
-                      subtitle: `Generate & email QR pass now · scan at kiosk & insert ₱${totalFee}.00 coins to unlatch`,
+                      subtitle: `Generate pass & email backup PIN · scan at kiosk & insert ₱${totalFee}.00 coins`,
                     },
                   ]
                 ).map((pm) => (
@@ -1206,16 +1077,14 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   {activeSession
                     ? 'End Active Session First'
                     : isGeneratingQr
-                    ? 'Generating & Emailing QR Pass...'
-                    : paymentMethod === 'wallet'
-                    ? `Authorize & Generate Unlock QR (₱${totalFee})`
+                    ? 'Generating Pass & Emailing PIN...'
                     : paymentMethod === 'cash'
                     ? `Generate Unlock QR · Pay Coin at Kiosk (₱${totalFee})`
                     : `Pay via ${formatPaymentMethodLabel(paymentMethod)} (₱${totalFee})`}
                 </span>
               </button>
               <p className="text-[11px] text-[#64748B] text-center leading-relaxed">
-                Generates a 5-minute single-use QR pass &amp; backup PIN and emails a scannable QR copy to {student.email}.
+                Generates a 5-minute single-use QR pass and backup PIN. The QR stays in this portal; the backup PIN is emailed to {student.email}.
               </p>
             </div>
           </div>
@@ -1320,30 +1189,6 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
 
               <div className="flex flex-wrap items-center justify-between gap-3 pt-4 border-t border-[#E2E8F0]">
                 <div className="flex flex-wrap items-center gap-2.5">
-                  <button
-                    onClick={toggleOverchargeProtection}
-                    className="px-3.5 py-2 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#1E293B] hover:bg-[#EDF2F5] flex items-center gap-2 cursor-pointer"
-                  >
-                    <Power className="w-3.5 h-3.5 text-[#4E6E81]" />
-                    <span>
-                      Overcharge Auto Cut-Off: {activeSession.isOverchargeProtectionActive ? 'ON' : 'OFF'}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void simulateFullCharge()}
-                    className="px-3.5 py-2 rounded-xl border border-[#5BC496]/50 bg-[#EBF9F3] text-xs font-semibold text-[#1E293B] hover:bg-[#5BC496]/20 flex items-center gap-2 cursor-pointer"
-                  >
-                    <BatteryCharging className="w-3.5 h-3.5 text-[#5BC496]" />
-                    <span>Simulate 100% Charge</span>
-                  </button>
-                  <button
-                    onClick={triggerSimulatedTamper}
-                    className="px-3.5 py-2 rounded-xl border border-red-200 bg-red-50 text-xs font-semibold text-[#DC2626] hover:bg-red-100 flex items-center gap-2 cursor-pointer"
-                  >
-                    <ShieldCheck className="w-3.5 h-3.5 text-[#DC2626]" />
-                    <span>Simulate Unexpected Door Open</span>
-                  </button>
                 </div>
               </div>
             </div>
@@ -1513,7 +1358,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
           </div>
 
           <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 space-y-5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#E2E8F0] pb-5">
+            <div className="border-b border-[#E2E8F0] pb-5">
               <div>
                 <span className="text-xs font-semibold text-[#64748B] uppercase tracking-wider">
                   Available Balance
@@ -1525,20 +1370,6 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   Zero transaction surcharge at {station.name}. Extra kiosk coins auto-credit here.
                 </p>
               </div>
-              <div className="flex flex-wrap gap-2">
-                {[20, 50, 100, 200].map((amt) => (
-                  <button
-                    key={amt}
-                    type="button"
-                    disabled={isReloadingWallet}
-                    onClick={() => handleWalletReload(amt)}
-                    className="px-3.5 py-2.5 rounded-xl bg-[#5BC496] text-[#1E293B] text-xs font-bold font-mono hover:bg-[#48AD80] disabled:opacity-60 flex items-center gap-1 cursor-pointer shadow-sm transition-colors"
-                  >
-                    <Plus className="w-3.5 h-3.5 text-[#1E293B]" />
-                    <span>₱{amt}</span>
-                  </button>
-                ))}
-              </div>
             </div>
 
             {/* Online E-Payment Platform Selector & Custom Reload Simulation */}
@@ -1548,7 +1379,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   Simulate Online E-Payment Reload
                 </span>
                 <span className="text-[11px] text-[#64748B]">
-                  Step 1: Pick platform · Step 2: Tap preset or custom ₱ amount
+                  Step 1: Pick platform · Step 2: Enter your desired amount
                 </span>
               </div>
 
@@ -1639,7 +1470,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs text-[#64748B]">
               <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
                 <span className="font-bold text-[#1E293B] block mb-1">1. Campus E-Wallet</span>
-                Reload credits using GCash, Maya, or GoTyme Bank for 1-tap locker unlocks with zero surcharges.
+                Manage and reload wallet credits using GCash, Maya, or GoTyme Bank. Wallet balance is no longer accepted for locker bookings.
               </div>
               <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
                 <span className="font-bold text-[#1E293B] block mb-1">2. Direct E-Payment</span>
@@ -1739,42 +1570,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               Kiosk QR Scanner &amp; Hardware Terminal
             </h1>
             <p className="text-xs text-[#64748B]">
-              Tap Scan QR on the 20-compartment {station.name} touchscreen to open your camera, upload your QR PNG, or enter your 6-digit backup PIN to unlock a compartment.
+              Scan your booking QR with the kiosk camera or enter your 6-digit PIN on the touchscreen.
             </p>
           </div>
-
-          {pendingUnlockToken && (
-            <div className="p-4 rounded-2xl bg-[#FFFFFF] border-2 border-[#5BC496] flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
-              <div className="flex items-start gap-3">
-                <div className="w-9 h-9 rounded-xl bg-[#EBF9F3] text-[#4E6E81] flex items-center justify-center shrink-0">
-                  <QrCode className="w-5 h-5 text-[#5BC496]" />
-                </div>
-                <div>
-                  <span className="text-xs font-bold text-[#1E293B] block">
-                    Active Unlock QR Ready for Kiosk Scan · {formatCompartmentLabel(pendingUnlockToken.slotNumber)} ({pendingUnlockToken.pricingTier})
-                  </span>
-                  <span className="text-xs text-[#64748B]">
-                    Tap <strong className="text-[#4E6E81]">&ldquo;Scan QR&rdquo;</strong> on the kiosk touchscreen below, hold your emailed QR pass to the camera, or enter PIN{' '}
-                    <strong className="font-mono text-[#1E293B]">{pendingUnlockToken.pinCode}</strong> ({formatTimer(pendingSecondsLeft)} left).
-                  </span>
-                </div>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  onClick={() => setShowQrModal(true)}
-                  className="px-3 py-1.5 rounded-lg bg-[#4E6E81] text-white text-xs font-semibold hover:bg-[#3D5767] cursor-pointer"
-                >
-                  View QR Modal
-                </button>
-                <button
-                  onClick={cancelPendingUnlock}
-                  className="px-2.5 py-1.5 rounded-lg border border-[#E2E8F0] text-xs text-[#64748B] hover:text-[#DC2626] cursor-pointer"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
 
           <div className="w-full min-h-[720px] rounded-2xl border border-[#E2E8F0] overflow-hidden bg-[#F8FAFC] shadow-sm">
             <KioskHardwareSimulator />
@@ -1793,35 +1591,12 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
           <p className="text-sm text-[#64748B]">
             {section === 'support'
               ? 'Report compartment issues or contact USTP UniCharge hardware operations.'
-              : 'Configure security, biometric lock retrieval, and notification alerts.'}
+              : 'Configure your account and notification alerts.'}
           </p>
         </div>
 
         {section === 'settings' ? (
           <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] divide-y divide-[#E2E8F0]">
-            <div className="p-5 flex items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <Fingerprint className="w-5 h-5 text-[#4E6E81] shrink-0" />
-                <div>
-                  <span className="text-sm font-semibold text-[#1E293B] block">Biometric Locker Retrieval</span>
-                  <span className="text-xs text-[#64748B]">Allow Face ID / Fingerprint verification when unlocking</span>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={toggleBiometrics}
-                className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer shrink-0 ${
-                  student.biometricEnabled ? 'bg-[#5BC496]' : 'bg-gray-300'
-                }`}
-              >
-                <div
-                  className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${
-                    student.biometricEnabled ? 'translate-x-5.5' : 'translate-x-0.5'
-                  }`}
-                />
-              </button>
-            </div>
-
             <div className="p-5 flex items-center justify-between gap-4">
               <div className="flex items-center gap-3">
                 <Bell className="w-5 h-5 text-[#4E6E81] shrink-0" />
@@ -1877,7 +1652,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
               </div>
               <div className="space-y-2 text-xs text-[#64748B] leading-relaxed">
                 <p>
-                  <strong className="text-[#1E293B]">QR Booking &amp; Payment:</strong> Choose a compartment &amp; tier in Avail a Locker, pick Campus E-Wallet, GCash, Maya, GoTyme Bank, or Kiosk Coin Slot, then scan the QR (or emailed PNG / 6-digit PIN) at the kiosk within 5 minutes.
+                  <strong className="text-[#1E293B]">QR Booking &amp; Payment:</strong> Choose a compartment &amp; tier in Avail a Locker, pick GCash, Maya, GoTyme Bank, or Kiosk Coin Slot, then scan the QR displayed in this portal or enter the emailed 6-digit PIN at the kiosk within 5 minutes.
                 </p>
                 <p>
                   <strong className="text-[#1E293B]">Kiosk Coin Slot:</strong> After scanning your Coin Slot QR or PIN at the kiosk, the LED screen will prompt you to insert the required ₱1/₱5/₱10/₱20 coins to unlatch your compartment.
@@ -1936,7 +1711,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
 
             <div className="p-3 rounded-xl bg-[#EDF2F5] border border-[#4E6E81]/20 text-xs text-[#1E293B] leading-relaxed">
               Walk up to the <strong>{pendingUnlockToken.stationName}</strong>, tap{' '}
-              <strong>&lsquo;Scan QR&rsquo;</strong> on the touchscreen, and hold this QR code (or the PNG from your email) to the kiosk camera to release{' '}
+              <strong>&lsquo;Scan QR&rsquo;</strong> on the touchscreen, and show this portal QR to the kiosk camera to release{' '}
               <strong>{formatCompartmentLabel(pendingUnlockToken.slotNumber)}</strong> ({pendingUnlockToken.pricingTier}).
               {pendingUnlockToken.paymentMethod === 'cash' && (
                 <span className="block mt-1 font-semibold text-[#4E6E81]">
@@ -1951,7 +1726,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   <Mail className="w-4 h-4 text-[#5BC496] shrink-0 mt-0.5" />
                   <div className="min-w-0">
                     <span className="font-semibold block break-words">
-                      QR pass emailed to {pendingUnlockToken.emailSentTo || student.email}
+                      Backup PIN emailed to {pendingUnlockToken.emailSentTo || student.email}
                     </span>
                     <span className="text-[11px] text-[#64748B] block break-words">
                       {pendingUnlockToken.emailSentFrom
@@ -1972,26 +1747,26 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                 </div>
                 <button
                   type="button"
-                  disabled={isResendingQrEmail}
-                  onClick={() => void handleResendQrEmail()}
+                  disabled={isSendingUnlockPin}
+                  onClick={() => void handleEmailUnlockPin()}
                   className="text-[11px] font-bold text-[#4E6E81] hover:text-[#1E293B] underline shrink-0 cursor-pointer disabled:opacity-50"
                 >
-                  {isResendingQrEmail ? 'Sending...' : 'Resend'}
+                  {isSendingUnlockPin ? 'Sending...' : 'Resend PIN'}
                 </button>
               </div>
             ) : (
               <div className="p-2.5 sm:p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-center justify-between gap-2">
                 <span className="flex-1">
                   {pendingUnlockToken.emailError ||
-                    `Want a copy in your inbox? Send this scannable QR pass to ${student.email}.`}
+                    `Email the 6-digit backup PIN to ${student.email}. The QR remains available in this portal.`}
                 </span>
                 <button
                   type="button"
-                  disabled={isResendingQrEmail}
-                  onClick={() => void handleResendQrEmail()}
+                  disabled={isSendingUnlockPin}
+                  onClick={() => void handleEmailUnlockPin()}
                   className="px-2.5 py-1 rounded-lg bg-[#4E6E81] text-white text-[11px] font-bold shrink-0 cursor-pointer hover:bg-[#3D5767] disabled:opacity-50"
                 >
-                  {isResendingQrEmail ? 'Sending...' : 'Email QR Pass'}
+                  {isSendingUnlockPin ? 'Sending...' : 'Email Backup PIN'}
                 </button>
               </div>
             )}
@@ -2047,14 +1822,6 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={() => void handleDownloadQrPng()}
-                className="mt-2.5 px-3 py-1.5 rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#EDF2F5] text-[11px] font-semibold text-[#4E6E81] inline-flex items-center gap-1.5 cursor-pointer transition-colors"
-              >
-                <Download className="w-3.5 h-3.5 text-[#5BC496]" />
-                <span>Download QR PNG</span>
-              </button>
             </div>
 
             {pendingSecondsLeft === 0 && (

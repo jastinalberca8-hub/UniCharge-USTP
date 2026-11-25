@@ -2,7 +2,7 @@ import express from 'express';
 import { optionalAuth, requireAuth, signAppToken, type AuthRequest } from './middleware/auth.ts';
 import {
   EmailDeliveryUnavailableError,
-  sendLockerQrUnlockEmail,
+  sendLockerUnlockPinEmail,
   sendPasswordResetCodeEmail,
   sendVerificationCodeEmail,
 } from './lib/mailer.ts';
@@ -12,6 +12,7 @@ import {
   AuthValidationError,
   adminProvisionStaffDb,
   adminResolveAlertDb,
+  adminSimulateSessionFullChargeDb,
   adminUpdateSlotDb,
   authenticateUserDb,
   cancelUnlockTokenDb,
@@ -359,7 +360,7 @@ apiApp.post('/api/kiosk/unlock-tokens', requireAuth, async (req: AuthRequest, re
       serviceType: String(serviceType || 'charging') as ServiceType,
       ...(typeof pricingTier === 'string' && pricingTier.trim() ? { pricingTier } : {}),
       durationMinutes: Number(durationMinutes) || 120,
-      paymentMethod: String(paymentMethod || 'wallet') as PaymentMethod,
+      paymentMethod: String(paymentMethod || 'gcash') as PaymentMethod,
     });
 
     let emailSent = false;
@@ -369,19 +370,17 @@ apiApp.post('/api/kiosk/unlock-tokens', requireAuth, async (req: AuthRequest, re
     let emailPreviewUrl: string | undefined;
 
     try {
-      const delivery = await sendLockerQrUnlockEmail({
+      const delivery = await sendLockerUnlockPinEmail({
         toEmail: userEmail,
         recipientName: userName,
         stationName: token.stationName,
         stationCode: token.stationCode,
-        slotNumber: token.slotNumber,
         compartmentLabel: formatCompartmentLabel(token.slotNumber),
         pricingTier: token.pricingTier,
         durationMinutes: token.durationMinutes,
         totalFee: token.totalFee,
         paymentMethod: token.paymentMethod,
         pinCode: token.pinCode,
-        qrPayload: token.qrPayload,
         tokenId: token.tokenId,
         expiresInMinutes: 5,
       });
@@ -391,8 +390,8 @@ apiApp.post('/api/kiosk/unlock-tokens', requireAuth, async (req: AuthRequest, re
       emailPreviewUrl = delivery.previewUrl;
     } catch (mailErr: unknown) {
       emailError =
-        mailErr instanceof Error ? mailErr.message : 'Unable to send QR pass email.';
-      console.error('QR unlock email send error:', mailErr);
+        mailErr instanceof Error ? mailErr.message : 'Unable to send unlock PIN email.';
+      console.error('Unlock PIN email send error:', mailErr);
     }
 
     res.status(201).json({
@@ -424,7 +423,7 @@ apiApp.post('/api/kiosk/unlock-tokens', requireAuth, async (req: AuthRequest, re
   }
 });
 
-apiApp.post('/api/kiosk/email-unlock-qr', requireAuth, async (req: AuthRequest, res) => {
+apiApp.post('/api/kiosk/email-unlock-pin', requireAuth, async (req: AuthRequest, res) => {
   try {
     const uid = req.user!.uid;
     const { tokenId } = req.body ?? {};
@@ -433,19 +432,17 @@ apiApp.post('/api/kiosk/email-unlock-qr', requireAuth, async (req: AuthRequest, 
     }
 
     const { token, userEmail, userName } = await getUnlockTokenByIdDb(uid, String(tokenId));
-    const delivery = await sendLockerQrUnlockEmail({
+    const delivery = await sendLockerUnlockPinEmail({
       toEmail: userEmail,
       recipientName: userName,
       stationName: token.stationName,
       stationCode: token.stationCode,
-      slotNumber: token.slotNumber,
       compartmentLabel: formatCompartmentLabel(token.slotNumber),
       pricingTier: token.pricingTier,
       durationMinutes: token.durationMinutes,
       totalFee: token.totalFee,
       paymentMethod: token.paymentMethod,
       pinCode: token.pinCode,
-      qrPayload: token.qrPayload,
       tokenId: token.tokenId,
       expiresInMinutes: 5,
     });
@@ -665,6 +662,33 @@ apiApp.post('/api/admin/slots/update', requireAuth, async (req: AuthRequest, res
     }
     const message = error instanceof Error ? error.message : 'Failed to update slot';
     console.error('Admin slot update error:', error);
+    res.status(500).json({ error: message });
+  }
+});
+
+apiApp.post('/api/admin/sessions/simulate-full-charge', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const uid = req.user!.uid;
+    const email = req.user!.email || '';
+    const bootstrap = await getBootstrapData(uid, email);
+    if (bootstrap.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: Admin access required' });
+    }
+
+    const sessionId =
+      typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+    if (!sessionId) {
+      return res.status(400).json({ error: 'A session ID is required.' });
+    }
+
+    const adminStationActivity = await adminSimulateSessionFullChargeDb(sessionId);
+    res.json({ ok: true, adminStationActivity });
+  } catch (error: unknown) {
+    if (error instanceof AuthValidationError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    const message = error instanceof Error ? error.message : 'Failed to simulate full charge';
+    console.error('Admin full-charge simulation error:', error);
     res.status(500).json({ error: message });
   }
 });

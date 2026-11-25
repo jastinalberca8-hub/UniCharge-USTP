@@ -62,6 +62,8 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
     adminStationActivity,
     adminRemoteUnlockSlot,
     adminToggleSlotMaintenance,
+    adminSimulateSessionFullCharge,
+    triggerUnexpectedDoorOpen,
     resolveSecurityAlert,
   } = useUniCharge();
 
@@ -71,6 +73,12 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
     text: string;
   } | null>(null);
   const [togglingSlotNumber, setTogglingSlotNumber] = useState<number | null>(null);
+  const [selectedSimulationSessionId, setSelectedSimulationSessionId] = useState('');
+  const [simulationFeedback, setSimulationFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+  const [isSimulatingCharge, setIsSimulatingCharge] = useState(false);
 
   const station = stations[0];
   const totalSlots = station?.totalSlots || TOTAL_COMPARTMENT_COUNT;
@@ -81,6 +89,12 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
   const maintenanceSlots = Math.max(0, totalSlots - availableSlots - inUseSlots);
   const totalPowerWatts = station?.powerDrawWatts || 0;
   const unresolvedAlerts = securityAlerts.filter((a) => !a.resolved).length;
+  const activeSimulationSessions = adminStationActivity.activeSessions.filter(
+    (session) => session.kind === 'active'
+  );
+  const selectedSimulationSession =
+    activeSimulationSessions.find((session) => session.id === selectedSimulationSessionId) ||
+    activeSimulationSessions[0];
 
   const chargingFree = station
     ? station.slots.filter((s) => s.category === 'charging' && s.status === 'available').length
@@ -96,7 +110,7 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold text-[#4E6E81] tracking-tight">
-              Admin &amp; Telemetry Portal
+              Admin
             </h1>
             <p className="text-sm text-[#64748B]">
               Real-time UniCharge Station health, 20-compartment solenoid overrides, and power telemetry.
@@ -313,6 +327,125 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
           <p className="text-sm text-[#64748B]">
             {station.name} ({station.campusCode}) — manage all {TOTAL_COMPARTMENT_COUNT} compartments ({CHARGING_SLOT_COUNT} Charging · {STORAGE_SLOT_COUNT} Storage).
           </p>
+        </div>
+
+        <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-5 space-y-4">
+          <div>
+            <h2 className="text-sm font-bold text-[#4E6E81]">Session Event Testing</h2>
+            <p className="text-xs text-[#64748B] mt-1">
+              Simulate a full charge or unexpected door opening for an active locker session.
+            </p>
+          </div>
+          {activeSimulationSessions.length > 0 && selectedSimulationSession ? (
+            <>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                <label
+                  htmlFor="simulation-session"
+                  className="text-xs font-semibold text-[#64748B] shrink-0"
+                >
+                  Active session
+                </label>
+                <select
+                  id="simulation-session"
+                  value={selectedSimulationSession.id}
+                  onChange={(event) => setSelectedSimulationSessionId(event.target.value)}
+                  className="min-w-0 flex-1 px-3 py-2 rounded-xl border border-[#E2E8F0] bg-white text-xs text-[#1E293B]"
+                >
+                  {activeSimulationSessions.map((session) => (
+                    <option key={session.id} value={session.id}>
+                      {session.userName} · {formatCompartmentLabel(session.slotNumber)} · {session.pricingTier}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-xs text-[#64748B]">
+                  {selectedSimulationSession.batteryCurrent ?? 0}% charged
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={
+                    isSimulatingCharge || selectedSimulationSession.serviceType !== 'charging'
+                  }
+                  onClick={async () => {
+                    setIsSimulatingCharge(true);
+                    try {
+                      const result = await adminSimulateSessionFullCharge(
+                        selectedSimulationSession.id
+                      );
+                      setSimulationFeedback({
+                        type: result.success ? 'success' : 'error',
+                        text: result.message,
+                      });
+                    } catch (error) {
+                      setSimulationFeedback({
+                        type: 'error',
+                        text:
+                          error instanceof Error
+                            ? error.message
+                            : 'Failed to simulate full charge.',
+                      });
+                    } finally {
+                      setIsSimulatingCharge(false);
+                    }
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-[#EBF9F3] border border-[#5BC496]/50 text-xs font-semibold text-[#1E293B] hover:bg-[#5BC496]/20 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {isSimulatingCharge ? 'Simulating...' : 'Simulate 100% Charge'}
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectedSimulationSession.userUid}
+                  onClick={async () => {
+                    if (!selectedSimulationSession.userUid) return;
+                    const notificationSent = await triggerUnexpectedDoorOpen(
+                      station.id,
+                      selectedSimulationSession.slotNumber,
+                      {
+                        userUid: selectedSimulationSession.userUid,
+                        sessionId: selectedSimulationSession.id,
+                      }
+                    );
+                    setSimulationFeedback({
+                      type: notificationSent ? 'success' : 'error',
+                      text: notificationSent
+                        ? `Door-open test and student alert sent for ${formatCompartmentLabel(
+                            selectedSimulationSession.slotNumber
+                          )}.`
+                        : 'Door-open test ran, but the student alert could not be delivered. Check Firebase authentication and Firestore rules.',
+                    });
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-[#DC2626] hover:bg-red-100 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  Test Unexpected Door Open
+                </button>
+              </div>
+              {selectedSimulationSession.serviceType !== 'charging' && (
+                <p className="text-[11px] text-[#64748B]">
+                  Full-charge simulation is only available for charging sessions.
+                </p>
+              )}
+              {!selectedSimulationSession.userUid && (
+                <p className="text-[11px] text-[#DC2626]">
+                  Notifications require a session linked to a student account.
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="text-xs text-[#64748B]">
+              No active locker sessions are available for testing.
+            </p>
+          )}
+          {simulationFeedback && (
+            <p
+              role="status"
+              className={`text-xs ${
+                simulationFeedback.type === 'success' ? 'text-[#15803D]' : 'text-[#DC2626]'
+              }`}
+            >
+              {simulationFeedback.text}
+            </p>
+          )}
         </div>
 
         {/* Full-Width Physical 20-Compartment Simulator (Admin Monitor Mode) */}

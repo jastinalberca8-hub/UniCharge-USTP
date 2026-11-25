@@ -1,5 +1,4 @@
 import nodemailer from 'nodemailer';
-import QRCode from 'qrcode';
 
 export interface EmailSendResult {
   deliveryMode: 'resend' | 'smtp' | 'ethereal';
@@ -319,34 +318,21 @@ export async function sendPasswordResetCodeEmail(params: {
   });
 }
 
-export async function sendLockerQrUnlockEmail(params: {
+export async function sendLockerUnlockPinEmail(params: {
   toEmail: string;
   recipientName: string;
   stationName: string;
   stationCode: string;
-  slotNumber: number;
   compartmentLabel: string;
   pricingTier: string;
   durationMinutes: number;
   totalFee: number;
   paymentMethod?: string;
   pinCode: string;
-  qrPayload: string;
   tokenId: string;
   expiresInMinutes?: number;
 }): Promise<EmailSendResult> {
   const expiresMins = params.expiresInMinutes ?? 5;
-  const qrBuffer = await QRCode.toBuffer(params.qrPayload, {
-    type: 'png',
-    width: 400,
-    margin: 4,
-    errorCorrectionLevel: 'M',
-    color: {
-      dark: '#1E293B',
-      light: '#FFFFFF',
-    },
-  });
-
   const safeName = escapeHtml(params.recipientName || 'Student');
   const safeStation = escapeHtml(params.stationName);
   const safeCode = escapeHtml(params.stationCode);
@@ -365,19 +351,20 @@ export async function sendLockerQrUnlockEmail(params: {
     `6-Digit Backup Code: ${params.pinCode}`,
     `Pass ID: ${params.tokenId}`,
     '',
-    isCoinPayment
-      ? `Hold the attached QR code in front of the ${params.stationName} kiosk camera after tapping "Scan QR" (or enter the 6-digit backup code), then insert PHP ${params.totalFee} in coins when prompted to unlatch.`
-      : `Hold the attached QR code in front of the ${params.stationName} kiosk camera after tapping "Scan QR" (or enter the 6-digit backup code).`,
+    `At the kiosk, scan the QR pass displayed in your UniCharge portal or enter the 6-digit backup code: ${params.pinCode}.`,
+    ...(isCoinPayment
+      ? [`Then insert PHP ${params.totalFee} in coins when prompted to unlatch.`]
+      : []),
     `Valid for ${expiresMins} minutes (single use).`,
   ].join('\n');
 
   const html = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px; background: #F8FAFC; color: #1E293B;">
       <div style="background: #FFFFFF; border: 1px solid #E2E8F0; border-top: 4px solid #4E6E81; border-radius: 12px; padding: 28px;">
-        <h2 style="margin: 0 0 8px; color: #1E293B; font-size: 20px;">UniCharge Kiosk Unlock Pass</h2>
+        <h2 style="margin: 0 0 8px; color: #1E293B; font-size: 20px;">UniCharge Kiosk Unlock Details</h2>
         <p style="margin: 0 0 16px; color: #64748B; font-size: 14px;">Hi ${safeName},</p>
         <p style="margin: 0 0 18px; color: #334155; font-size: 14px; line-height: 1.5;">
-          Tap <strong>Scan QR</strong> on the <strong>${safeStation}</strong> (${safeCode}) kiosk and hold this QR code up to the camera to unlock <strong>${safeCompartment}</strong> (${safeTier}, ${params.durationMinutes} min).
+          At the <strong>${safeStation}</strong> (${safeCode}) kiosk, scan the QR pass displayed in your UniCharge portal or enter the 6-digit backup code below to unlock <strong>${safeCompartment}</strong> (${safeTier}, ${params.durationMinutes} min).
           ${
             isCoinPayment
               ? `<br /><strong style="color: #0F766E;">Coin Slot Payment:</strong> Insert <strong>PHP ${params.totalFee}.00</strong> in coins into the kiosk coin slot when prompted after scanning.`
@@ -385,7 +372,6 @@ export async function sendLockerQrUnlockEmail(params: {
           }
         </p>
         <div style="background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 18px; text-align: center; margin: 0 0 18px;">
-          <img src="cid:unicharge-qr-pass" alt="UniCharge Kiosk QR Code" width="220" height="220" style="display: block; margin: 0 auto 14px; border-radius: 8px; background: #FFFFFF;" />
           <div style="font-size: 11px; color: #64748B; font-weight: 600;">Backup Code</div>
           <div style="font-family: monospace; font-size: 26px; font-weight: 700; letter-spacing: 5px; color: #0F172A; margin-top: 2px;">${safePin}</div>
         </div>
@@ -401,14 +387,6 @@ export async function sendLockerQrUnlockEmail(params: {
     subject,
     text,
     html,
-    attachments: [
-      {
-        filename: `unicharge-${params.stationCode.toLowerCase()}-slot-${params.slotNumber}.png`,
-        content: qrBuffer,
-        contentType: 'image/png',
-        cid: 'unicharge-qr-pass',
-      },
-    ],
   });
 }
 

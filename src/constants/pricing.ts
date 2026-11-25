@@ -25,7 +25,7 @@ export const PRICING_TIERS: PricingTier[] = [
     durationLabel: '3–5 hrs',
     durationMinutes: 300,
     fee: 20,
-    description: 'Extended charging with overcharge auto cut-off',
+    description: 'Extended charging time',
   },
   {
     id: 'storage-short',

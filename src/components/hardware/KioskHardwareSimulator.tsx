@@ -8,7 +8,6 @@ import {
 } from '../../constants/pricing';
 import { PendingUnlockToken } from '../../types';
 import { sound } from '../../utils/audio';
-import { QrMatrixSvg } from './QrMatrixSvg';
 import {
   Zap,
   Lock,
@@ -25,7 +24,6 @@ import {
   Camera,
   CameraOff,
   RefreshCw,
-  Upload,
   Loader2,
   Package,
   Coins,
@@ -60,7 +58,6 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
     verifyKioskUnlock,
     regenerateUnlockToken,
     activeSession,
-    triggerUnexpectedDoorOpen,
   } = useUniCharge();
 
   const isAdminMonitor = Boolean(adminMonitorOnly || currentUser?.role === 'admin');
@@ -87,15 +84,12 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
   const [doorAjarSeconds, setDoorAjarSeconds] = useState<number>(0);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const scannerBayVideoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scanLockRef = useRef<boolean>(false);
 
   const currentStation = stations[0];
-  const stationQrCode = `UNICHARGE-KIOSK|${currentStation.campusCode}`;
 
   const chargingFreeCount = currentStation.slots.filter(
     (s) => s.category === 'charging' && s.status === 'available'
@@ -152,22 +146,8 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
-    if (scannerBayVideoRef.current) {
-      scannerBayVideoRef.current.srcObject = null;
-    }
     setCameraActive(false);
   }, []);
-
-  useEffect(() => {
-    const bayVideo = scannerBayVideoRef.current;
-    if (!bayVideo) return;
-    if (cameraActive && screenMode === 'scan_qr' && streamRef.current) {
-      bayVideo.srcObject = streamRef.current;
-      void bayVideo.play().catch(() => {});
-    } else {
-      bayVideo.srcObject = null;
-    }
-  }, [cameraActive, screenMode]);
 
   const handleVerifyPayload = useCallback(
     async (payload: string) => {
@@ -274,7 +254,7 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
         typeof navigator.mediaDevices.getUserMedia !== 'function'
       ) {
         setCameraError(
-          'Camera access is unavailable in this browser context. Upload your QR email PNG or use the PIN pad below.'
+          'Camera access is unavailable in this browser. Use the 6-digit PIN below.'
         );
         return;
       }
@@ -298,15 +278,15 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
         const name = err instanceof DOMException ? err.name : '';
         if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
           setCameraError(
-            'Camera permission was blocked. Allow webcam access or upload the QR image from your email.'
+            'Camera permission was blocked. Allow camera access or use the 6-digit PIN below.'
           );
         } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
           setCameraError(
-            'No camera detected on this device. Upload the QR image from your email or use the 6-digit PIN.'
+            'No camera detected on this device. Use the 6-digit PIN below.'
           );
         } else {
           setCameraError(
-            'Could not start webcam stream. Upload the QR image from your email or enter the 6-digit PIN.'
+            'Could not start the camera. Use the 6-digit PIN below.'
           );
         }
       }
@@ -372,62 +352,6 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
     };
   }, [cameraActive, screenMode, handleVerifyPayload, stopCamera]);
 
-  const handleUploadQrImage = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
-    if (!file) return;
-
-    sound.playTap();
-    setScanFeedback(null);
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
-      if (!dataUrl) {
-        setScanFeedback({
-          type: 'error',
-          text: 'Unable to read the uploaded image file.',
-        });
-        return;
-      }
-      const img = new Image();
-      img.onload = () => {
-        const canvas = canvasRef.current || document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        if (!ctx) {
-          setScanFeedback({
-            type: 'error',
-            text: 'Unable to initialize QR image decoder.',
-          });
-          return;
-        }
-        ctx.drawImage(img, 0, 0, img.width, img.height);
-        const imageData = ctx.getImageData(0, 0, img.width, img.height);
-        const decoded = jsQR(imageData.data, imageData.width, imageData.height, {
-          inversionAttempts: 'attemptBoth',
-        });
-        if (!decoded?.data) {
-          setScanFeedback({
-            type: 'error',
-            text: 'No valid QR code found in that image. Try uploading the PNG attached to your UniCharge email.',
-          });
-          return;
-        }
-        void handleVerifyPayload(decoded.data);
-      };
-      img.onerror = () => {
-        setScanFeedback({
-          type: 'error',
-          text: 'Unsupported or corrupted image file.',
-        });
-      };
-      img.src = dataUrl;
-    };
-    reader.readAsDataURL(file);
-  };
-
   const handleKeyPress = (digit: string) => {
     sound.playTap();
     if (pinInput.length < 6) {
@@ -453,13 +377,6 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
   return (
     <div className="flex flex-col h-full bg-[#F8FAFC] text-[#1E293B] p-4 sm:p-5 overflow-y-auto">
       <canvas ref={canvasRef} className="hidden" />
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        onChange={handleUploadQrImage}
-        className="hidden"
-      />
 
       {/* Station Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4 pb-3 border-b border-[#E2E8F0]">
@@ -616,23 +533,17 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
 
               {screenMode === 'idle' && (
                 <div className="flex-1 flex flex-col items-center justify-between py-1 space-y-2">
-                  <div className="flex flex-col items-center">
-                    <span className="text-[9px] font-bold uppercase tracking-wider text-[#4E6E81] mb-1">
-                      Station QR · Mobile Pair
+                  <div className="flex-1 flex flex-col items-center justify-center px-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#4E6E81]">
+                      Ready to Scan
                     </span>
-                    <div className="bg-[#F8FAFC] p-2 rounded-xl border border-[#E2E8F0] shadow-xs">
-                      <QrMatrixSvg
-                        value={stationQrCode}
-                        size={86}
-                        foreground="#1E293B"
-                        accent="#5BC496"
-                      />
-                    </div>
+                    <p className="text-xs text-[#64748B] leading-snug mt-2">
+                      Scan your booking QR at the scanner below.
+                    </p>
+                    <p className="text-[10px] font-semibold text-[#4E6E81] mt-1">
+                      Or enter your 6-digit PIN.
+                    </p>
                   </div>
-
-                  <p className="text-[10px] text-[#64748B] leading-snug px-1">
-                    Scan your booking QR or enter your 6-digit PIN to unlatch or pay by coin.
-                  </p>
 
                   {isAdminMonitor ? (
                     <div className="w-full space-y-2 text-left">
@@ -661,8 +572,7 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
                         }}
                         className="w-full h-8.5 rounded-xl bg-[#4E6E81] hover:bg-[#3D5767] text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors shadow-xs"
                       >
-                        <Camera className="w-3.5 h-3.5 text-[#5BC496]" />
-                        <span>Scan QR</span>
+                        <span>Scan QR Code</span>
                       </button>
 
                       <button
@@ -738,7 +648,7 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
                               <div className="space-y-1">
                                 <ScanLine className="w-5 h-5 text-[#5BC496] mx-auto" />
                                 <p className="text-[10px] text-slate-300 leading-snug">
-                                  Point your emailed or mobile QR code at the camera.
+                                  Show the QR from your UniCharge portal to the kiosk camera.
                                 </p>
                               </div>
                             )}
@@ -757,7 +667,11 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
                     )}
                   </div>
 
-                  <div className="grid grid-cols-2 gap-1.5">
+                  <div
+                    className={`grid gap-1.5 ${
+                      cameraActive ? 'grid-cols-2' : 'grid-cols-1'
+                    }`}
+                  >
                     {cameraActive ? (
                       <button
                         type="button"
@@ -771,17 +685,7 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
                         <RefreshCw className="w-3 h-3" />
                         <span>Flip Cam</span>
                       </button>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={isVerifying}
-                        onClick={() => fileInputRef.current?.click()}
-                        className="py-1.5 px-2 rounded-lg bg-[#EDF2F5] hover:bg-[#E2E8F0] text-[#4E6E81] text-[10px] font-bold flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50"
-                      >
-                        <Upload className="w-3 h-3" />
-                        <span>Upload QR PNG</span>
-                      </button>
-                    )}
+                    ) : null}
 
                     {cameraActive ? (
                       <button
@@ -1148,40 +1052,23 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
               >
                 <span className="text-[9px] font-bold text-slate-200 uppercase tracking-wider block mb-1.5">
                   {screenMode === 'scan_qr'
-                    ? cameraActive
-                      ? 'OPTICAL LENS LIVE'
-                      : 'SCANNING QR...'
+                    ? 'SCANNING QR...'
                     : 'SCAN QR CODE'}
                 </span>
                 <div
-                  className={`mx-auto relative overflow-hidden rounded-lg bg-[#111827] border flex items-center justify-center transition-all duration-200 ${
+                  className={`mx-auto rounded-lg bg-[#111827] border flex items-center justify-center ${
                     screenMode === 'scan_qr'
-                      ? 'w-24 h-12 border-[#5BC496]/80 shadow-[0_0_10px_rgba(91,196,150,0.3)]'
+                      ? 'w-12 h-6 border-[#5BC496]/80'
                       : 'w-12 h-6 border-slate-600'
                   }`}
                 >
-                  <video
-                    ref={scannerBayVideoRef}
-                    playsInline
-                    muted
-                    className={`w-full h-full object-cover ${
-                      cameraActive && screenMode === 'scan_qr' ? 'block' : 'hidden'
+                  <span
+                    className={`w-8 h-2 rounded-xs transition-colors ${
+                      screenMode === 'scan_qr'
+                        ? 'bg-[#5BC496] shadow-[0_0_8px_#5BC496] animate-pulse'
+                        : 'bg-rose-400/90 shadow-[0_0_6px_#fb7185]'
                     }`}
                   />
-                  {cameraActive && screenMode === 'scan_qr' ? (
-                    <>
-                      <div className="absolute inset-1 border border-dashed border-[#5BC496]/85 rounded-sm pointer-events-none" />
-                      <span className="absolute left-1 right-1 top-1/2 -translate-y-1/2 h-0.5 bg-[#5BC496] shadow-[0_0_8px_#5BC496] animate-pulse pointer-events-none" />
-                    </>
-                  ) : (
-                    <span
-                      className={`w-8 h-2 rounded-xs transition-colors ${
-                        screenMode === 'scan_qr'
-                          ? 'bg-[#5BC496] shadow-[0_0_8px_#5BC496] animate-pulse'
-                          : 'bg-rose-400/90 shadow-[0_0_6px_#fb7185]'
-                      }`}
-                    />
-                  )}
                 </div>
               </button>
 
@@ -1235,22 +1122,6 @@ export const KioskHardwareSimulator: React.FC<KioskHardwareSimulatorProps> = ({
         {/* Bottom Hardware Plinth */}
         <div className="mt-3.5 pt-2.5 border-t border-[#3D5767] flex flex-wrap items-center justify-between gap-2 text-[10px] text-[#EDF2F5] font-mono">
           <span>Solenoid Latch: 12V 1.2A · 15 Charging / 5 Storage</span>
-          {(activeSession || currentStation.slots.some((s) => s.status === 'in_use')) && (
-            <button
-              type="button"
-              onClick={() => {
-                const targetSlot =
-                  activeSession?.slotNumber ||
-                  currentStation.slots.find((s) => s.status === 'in_use')?.slotNumber ||
-                  1;
-                void triggerUnexpectedDoorOpen(currentStation.id, targetSlot);
-              }}
-              className="px-2.5 py-1 rounded-lg bg-[#DC2626] hover:bg-red-700 text-white font-sans font-bold text-[10px] flex items-center gap-1 cursor-pointer transition-colors"
-            >
-              <AlertTriangle className="w-3 h-3" />
-              <span>Test Unexpected Door Open</span>
-            </button>
-          )}
           <span className="text-[#5BC496] font-semibold">UniCharge Station · USTP</span>
         </div>
       </div>

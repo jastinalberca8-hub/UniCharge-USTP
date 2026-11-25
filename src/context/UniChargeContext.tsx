@@ -158,7 +158,7 @@ interface UniChargeContextType {
     message: string;
     token?: PendingUnlockToken;
   }>;
-  resendUnlockQrEmail: () => Promise<{
+  resendUnlockPinEmail: () => Promise<{
     success: boolean;
     message: string;
     emailSentTo?: string;
@@ -207,7 +207,6 @@ interface UniChargeContextType {
       referenceCode?: string;
     }
   ) => Promise<{ success: boolean; message: string; referenceCode?: string }>;
-  toggleBiometrics: () => void;
   togglePushNotifications: () => void;
   toggleOverchargeProtection: () => void;
   updateUserProfile: (updates: {
@@ -217,9 +216,11 @@ interface UniChargeContextType {
     avatar?: string;
   }) => void;
   closeKioskDoor: (slotNumber: number) => void;
-  triggerSimulatedTamper: () => void;
-  simulateFullCharge: () => Promise<void>;
-  triggerUnexpectedDoorOpen: (stationId?: string, slotNumber?: number) => Promise<void>;
+  triggerUnexpectedDoorOpen: (
+    stationId?: string,
+    slotNumber?: number,
+    notificationTarget?: { userUid: string; sessionId: string }
+  ) => Promise<boolean>;
   setHardwareKioskStationId: (stationId: string) => void;
   // Real-Time Firestore Notifications
   notifications: DashboardNotification[];
@@ -237,6 +238,9 @@ interface UniChargeContextType {
     stationId: string,
     slotNumber: number
   ) => Promise<{ success: boolean; message?: string }>;
+  adminSimulateSessionFullCharge: (
+    sessionId: string
+  ) => Promise<{ success: boolean; message: string }>;
   adminProvisionStaff: (params: {
     name: string;
     email: string;
@@ -633,6 +637,18 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             return localActive === null ? prevMap : { ...prevMap, [syncedUser.id]: null };
           }
           if (localActive && localActive.sessionId === serverActive.sessionId) {
+            if (serverActive.batteryCurrent > localActive.batteryCurrent) {
+              return {
+                ...prevMap,
+                [syncedUser.id]: {
+                  ...localActive,
+                  batteryCurrent: serverActive.batteryCurrent,
+                  chargingRateWatts: serverActive.chargingRateWatts,
+                  isOverchargeProtectionActive:
+                    serverActive.isOverchargeProtectionActive,
+                },
+              };
+            }
             return prevMap;
           }
           return { ...prevMap, [syncedUser.id]: serverActive };
@@ -947,14 +963,16 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         );
         if (prev.remainingSeconds === newRemaining) return prevMap;
         const elapsedSeconds = Math.max(0, prev.durationMinutes * 60 - newRemaining);
-        const simulatedCurrentBattery = Math.min(
-          100,
-          Math.floor(prev.batteryInitial + elapsedSeconds / 30)
+        const simulatedCurrentBattery = Math.max(
+          prev.batteryCurrent,
+          Math.min(100, Math.floor(prev.batteryInitial + elapsedSeconds / 30))
         );
+        const isChargeComplete =
+          prev.serviceType === 'charging' && simulatedCurrentBattery >= 100;
         const tempVariance = Math.sin(Date.now() / 15000) * 1.2;
         const currentTemp = +(29.5 + tempVariance).toFixed(1);
         const wattage =
-          prev.serviceType === 'storage' || newRemaining === 0
+          prev.serviceType === 'storage' || newRemaining === 0 || isChargeComplete
             ? 0
             : simulatedCurrentBattery > 85
             ? 18.5
@@ -976,6 +994,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                 batteryCurrent: prev.serviceType === 'charging' ? simulatedCurrentBattery : prev.batteryCurrent,
                 lockerTemperature: currentTemp,
                 chargingRateWatts: wattage,
+                isOverchargeProtectionActive: isChargeComplete
+                  ? true
+                  : prev.isOverchargeProtectionActive,
               };
 
         return { ...prevMap, [uid]: nextSession };
@@ -1420,7 +1441,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
   };
 
-  // STEP 1 of Secure IoT Unlock: Generate time-sensitive 5-minute QR / 6-digit PIN & email pass
+  // STEP 1 of Secure IoT Unlock: Generate a time-sensitive QR / PIN pass and email the PIN
   const generateUnlockToken = async (
     paymentMethod: PaymentMethod
   ): Promise<{ success: boolean; message: string; token?: PendingUnlockToken }> => {
@@ -1431,6 +1452,14 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       return {
         success: false,
         message: 'Admin accounts cannot avail student compartments. Kiosk usage is restricted to students.',
+      };
+    }
+
+    if (paymentMethod === 'wallet') {
+      return {
+        success: false,
+        message:
+          'Campus E-Wallet is no longer available for locker bookings. Choose GCash, Maya, GoTyme Bank, or Kiosk Coin Slot.',
       };
     }
 
@@ -1466,15 +1495,6 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         : getDefaultTierForService(selectedService);
     const fee = activeTier.fee;
 
-    if (paymentMethod === 'wallet' && student.walletBalance < fee) {
-      return {
-        success: false,
-        message: `Insufficient campus e-wallet balance (₱${student.walletBalance.toFixed(
-          2
-        )}). Please reload ₱ or choose GCash, Maya, or GoTyme Bank.`,
-      };
-    }
-
     if (isBackendSessionRef.current) {
       try {
         const data = await authorizedFetch('/api/kiosk/unlock-tokens', {
@@ -1507,7 +1527,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         notifyStationSync();
 
         const emailSuffix = serverToken.emailSent
-          ? ` QR pass emailed to ${serverToken.emailSentTo}.`
+          ? ` Backup PIN emailed to ${serverToken.emailSentTo}.`
           : '';
         return {
           success: true,
@@ -1577,11 +1597,17 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   };
 
   const regenerateUnlockToken = async () => {
-    const method = pendingUnlockToken?.paymentMethod || 'wallet';
+    if (pendingUnlockToken?.paymentMethod === 'wallet') {
+      const message =
+        'This expired pass used Campus E-Wallet, which is no longer available. Start a new booking and choose GCash, Maya, GoTyme Bank, or Kiosk Coin Slot.';
+      setReservationTimeoutMessage(message);
+      return { success: false, message };
+    }
+    const method = pendingUnlockToken?.paymentMethod || 'gcash';
     return generateUnlockToken(method);
   };
 
-  const resendUnlockQrEmail = async (): Promise<{
+  const resendUnlockPinEmail = async (): Promise<{
     success: boolean;
     message: string;
     emailSentTo?: string;
@@ -1593,22 +1619,22 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     if (!pendingUnlockToken) {
       return {
         success: false,
-        message: 'No active QR unlock token to email.',
+        message: 'No active unlock pass to email.',
       };
     }
     if (!isBackendSessionRef.current) {
       return {
         success: false,
-        message: 'Sign in with a registered student account to email QR passes.',
+        message: 'Sign in with a registered student account to email the backup PIN.',
       };
     }
     try {
-      const data = await authorizedFetch('/api/kiosk/email-unlock-qr', {
+      const data = await authorizedFetch('/api/kiosk/email-unlock-pin', {
         method: 'POST',
         body: JSON.stringify({ tokenId: pendingUnlockToken.tokenId }),
       });
       if (!data?.sent) {
-        return { success: false, message: 'Unable to send QR pass email.' };
+        return { success: false, message: 'Unable to send unlock PIN email.' };
       }
       setPendingUnlockToken((prev) =>
         prev
@@ -1625,7 +1651,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       );
       return {
         success: true,
-        message: `QR pass sent to ${data.emailSentTo}${data.emailSentFrom ? ` from ${data.emailSentFrom}` : ''}.`,
+        message: `Backup PIN sent to ${data.emailSentTo}${data.emailSentFrom ? ` from ${data.emailSentFrom}` : ''}.`,
         emailSentTo: data.emailSentTo,
         emailSentFrom: data.emailSentFrom,
         deliveryMode: data.deliveryMode,
@@ -1633,7 +1659,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       };
     } catch (error: unknown) {
       const message =
-        error instanceof Error ? error.message : 'Unable to send QR pass email.';
+        error instanceof Error ? error.message : 'Unable to send unlock PIN email.';
       setPendingUnlockToken((prev) => (prev ? { ...prev, emailError: message } : null));
       return { success: false, message };
     }
@@ -2268,6 +2294,14 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   ): Promise<{ success: boolean; message: string }> => {
     sound.playBeep();
 
+    if (paymentMethod === 'wallet') {
+      return {
+        success: false,
+        message:
+          'Campus E-Wallet is no longer available for locker bookings. Choose GCash, Maya, GoTyme Bank, or Kiosk Coin Slot.',
+      };
+    }
+
     if (activeSession?.status === 'active') {
       return {
         success: false,
@@ -2297,17 +2331,6 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         ? selectedTier
         : getDefaultTierForService(selectedService);
     const fee = activeTier.fee;
-
-    if (paymentMethod === 'wallet') {
-      if (student.walletBalance < fee) {
-        return {
-          success: false,
-          message: `Insufficient campus e-wallet balance (₱${student.walletBalance.toFixed(
-            2
-          )}). Please top up or choose GCash/Maya.`,
-        };
-      }
-    }
 
     let newSession: ActiveSession = {
       sessionId: `USTP-SES-${Math.floor(10000 + Math.random() * 90000)}`,
@@ -2339,7 +2362,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           method: 'POST',
           body: JSON.stringify({
             session: newSession,
-            deductWalletAmount: paymentMethod === 'wallet' ? fee : 0,
+            deductWalletAmount: 0,
           }),
         });
         if (data?.session) newSession = data.session as ActiveSession;
@@ -2363,8 +2386,6 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           message: error instanceof Error ? error.message : 'Unable to start locker session.',
         };
       }
-    } else if (paymentMethod === 'wallet') {
-      updateCurrentUserState((user) => ({ ...user, walletBalance: user.walletBalance - fee }));
     }
 
     sound.playSolenoidRelease();
@@ -2645,18 +2666,6 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     };
   };
 
-  const toggleBiometrics = () => {
-    sound.playTap();
-    const next = !student.biometricEnabled;
-    updateCurrentUserState((u) => ({ ...u, biometricEnabled: next }));
-    if (isBackendSessionRef.current) {
-      authorizedFetch('/api/profile', {
-        method: 'PATCH',
-        body: JSON.stringify({ biometricEnabled: next }),
-      }).catch((err) => console.error('Biometrics sync failed:', err));
-    }
-  };
-
   const togglePushNotifications = () => {
     sound.playTap();
     const next = !student.pushNotifications;
@@ -2710,20 +2719,25 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   };
 
   const pushNotificationEvent = useCallback(
-    async (input: CreateNotificationInput) => {
+    async (input: CreateNotificationInput): Promise<boolean> => {
+      const hasExternalRecipient = Boolean(
+        input.targetUserUid && input.targetUserUid !== currentUser?.id
+      );
       if (isFirestoreLive) {
         try {
           const wrote = await createFirestoreNotification(input);
-          if (wrote) return;
+          if (wrote) return true;
         } catch (err) {
           console.error('Failed to persist notification to Firestore:', err);
           setFirestoreError(err instanceof Error ? err.message : String(err));
         }
       }
 
+      if (hasExternalRecipient) return false;
+
       const fallbackNotif: DashboardNotification = {
         id: input.id,
-        userUid: currentUser?.id || 'local-user',
+        userUid: input.targetUserUid || currentUser?.id || 'local-user',
         sessionId: input.sessionId,
         stationId: input.stationId,
         stationCode: input.stationCode,
@@ -2752,6 +2766,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         if (prev.some((n) => n.id === fallbackNotif.id)) return prev;
         return [fallbackNotif, ...prev].slice(0, 4);
       });
+      return true;
     },
     [currentUser?.id, isFirestoreLive]
   );
@@ -2827,22 +2842,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     [isFirestoreLive]
   );
 
-  const simulateFullCharge = async () => {
-    if (!activeSession || !currentUser) return;
-    sound.playChargingConnected();
-    setActiveSessionForCurrentUser((prev) =>
-      prev
-        ? {
-            ...prev,
-            batteryCurrent: 100,
-            chargingRateWatts: 0,
-            status: 'completed',
-          }
-        : null
-    );
-  };
-
-  const triggerUnexpectedDoorOpen = async (stationId?: string, slotNumber?: number) => {
+  const triggerUnexpectedDoorOpen = async (
+    stationId?: string,
+    slotNumber?: number,
+    notificationTarget?: { userUid: string; sessionId: string }
+  ): Promise<boolean> => {
+    if (currentUser?.role !== 'admin') return false;
     const targetStationId =
       stationId || activeSession?.stationId || hardwareKioskStationId || stations[0]?.id;
     const targetStation = stations.find((s) => s.id === targetStationId) || stations[0];
@@ -2852,7 +2857,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       targetStation?.slots.find((s) => s.status === 'in_use')?.slotNumber ||
       1;
     const targetSessionId =
-      activeSession?.sessionId || `SES_${targetStation?.campusCode || 'KIOSK'}_${targetSlotNumber}`;
+      notificationTarget?.sessionId ||
+      activeSession?.sessionId ||
+      `SES_${targetStation?.campusCode || 'KIOSK'}_${targetSlotNumber}`;
 
     sound.playTamperAlarm();
     setHardwareKioskStationId(targetStationId);
@@ -2926,8 +2933,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         .catch((err) => console.error('Tamper alert persistence failed:', err));
     }
 
-    await pushNotificationEvent({
+    return pushNotificationEvent({
       id: `door_${targetSessionId}_${Date.now()}`,
+      targetUserUid: notificationTarget?.userUid,
       sessionId: targetSessionId,
       stationId: targetStationId,
       stationCode: targetStation?.campusCode || UNICHARGE_STATION_CODE,
@@ -2940,10 +2948,6 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         targetStation?.name || UNICHARGE_STATION_NAME
       } unlatched without authorization. Check your device or tap Kiosk Scanner immediately.`,
     });
-  };
-
-  const triggerSimulatedTamper = () => {
-    void triggerUnexpectedDoorOpen(activeSession?.stationId, activeSession?.slotNumber);
   };
 
   const adminRemoteUnlockSlot = (stationId: string, slotNumber: number) => {
@@ -3073,6 +3077,52 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     };
   };
 
+  const adminSimulateSessionFullCharge = async (
+    sessionId: string
+  ): Promise<{ success: boolean; message: string }> => {
+    if (currentUser?.role !== 'admin') {
+      return { success: false, message: 'Admin privileges required.' };
+    }
+    if (!isBackendSessionRef.current) {
+      return {
+        success: false,
+        message: 'A database connection is required to simulate a session charge.',
+      };
+    }
+    const targetSession = adminStationActivity.activeSessions.find(
+      (session) => session.id === sessionId && session.kind === 'active'
+    );
+    if (!targetSession || !targetSession.userUid) {
+      return {
+        success: false,
+        message: 'The selected active session has no student account to notify.',
+      };
+    }
+
+    try {
+      const data = await authorizedFetch('/api/admin/sessions/simulate-full-charge', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId }),
+      });
+      if (data.adminStationActivity) {
+        setAdminStationActivity(data.adminStationActivity as AdminStationActivity);
+      }
+      notifyStationSync();
+      sound.playChargingConnected();
+      return {
+        success: true,
+        message: 'The selected session is at 100%; the student will receive the charge alert.',
+      };
+    } catch (error) {
+      const requestMessage =
+        error instanceof Error ? error.message : 'Failed to simulate full charge.';
+      const message = requestMessage.includes('404')
+        ? 'The local API server does not have this route yet. Restart npm run dev, then retry.'
+        : requestMessage;
+      return { success: false, message };
+    }
+  };
+
   const adminProvisionStaff = async ({
     name,
     email,
@@ -3190,20 +3240,17 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         calculateFee,
         generateUnlockToken,
         regenerateUnlockToken,
-        resendUnlockQrEmail,
+        resendUnlockPinEmail,
         cancelPendingUnlock,
         verifyKioskUnlock,
         unlockViaCoinWalkUp,
         unlockStationViaQr,
         endActiveSession,
         topUpWallet,
-        toggleBiometrics,
         togglePushNotifications,
         toggleOverchargeProtection,
         updateUserProfile,
         closeKioskDoor,
-        triggerSimulatedTamper,
-        simulateFullCharge,
         triggerUnexpectedDoorOpen,
         setHardwareKioskStationId,
         notifications,
@@ -3217,6 +3264,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         deleteNotification,
         adminRemoteUnlockSlot,
         adminToggleSlotMaintenance,
+        adminSimulateSessionFullCharge,
         adminProvisionStaff,
         resolveSecurityAlert,
       }}

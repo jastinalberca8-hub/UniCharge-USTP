@@ -97,7 +97,10 @@ service cloud.firestore {
       allow create: if isSignedIn()
         && isValidId(notificationId)
         && isValidNotification(incoming())
-        && incoming().userUid == request.auth.uid
+        && (
+          incoming().userUid == request.auth.uid ||
+          (isAdmin() && incoming().type in ['charge_complete', 'unexpected_door_open'])
+        )
         && incoming().read == false
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;

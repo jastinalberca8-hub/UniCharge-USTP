@@ -1706,6 +1706,7 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
           id: r.sessionId,
           kind: remainingSeconds > 0 ? 'active' : 'expired',
           userUid: r.userUid ?? null,
+          stationId: r.stationId,
           userName: owner?.name || 'USTP Student',
           studentIdNumber: owner?.studentIdNumber || '—',
           slotNumber: r.slotNumber,
@@ -1718,6 +1719,7 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
           }).name,
           totalFee: Number(r.totalFee),
           paymentMethod: resolvedMethod,
+          batteryCurrent: r.batteryCurrent,
           createdAtMs: r.startTimeMs || r.createdAt.getTime(),
           remainingSeconds,
         };
@@ -1729,6 +1731,7 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
         id: t.tokenId,
         kind: 'reserved',
         userUid: t.userUid,
+        stationId: t.stationId,
         userName: owner?.name || 'USTP Student',
         studentIdNumber: owner?.studentIdNumber || '—',
         slotNumber: t.slotNumber,
@@ -1770,6 +1773,7 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
               ? 'active'
               : 'expired',
           userUid: r.userUid ?? null,
+          stationId: r.stationId,
           userName: owner?.name || 'USTP Student',
           studentIdNumber: owner?.studentIdNumber || '—',
           slotNumber: r.slotNumber,
@@ -1782,6 +1786,7 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
           }).name,
           totalFee: Number(r.totalFee),
           paymentMethod: resolvedMethod,
+          batteryCurrent: r.batteryCurrent,
           createdAtMs: r.startTimeMs || r.createdAt.getTime(),
           remainingSeconds,
         };
@@ -1801,6 +1806,32 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
     console.error('Database admin station activity failed:', error);
     return { activeSessions: [], pendingReservations: [], recentTransactions: [] };
   }
+}
+
+export async function adminSimulateSessionFullChargeDb(
+  sessionId: string
+): Promise<AdminStationActivity> {
+  const [updatedSession] = await db
+    .update(sessions)
+    .set({
+      batteryCurrent: 100,
+      chargingRateWatts: 0,
+      isOverchargeProtectionActive: true,
+    })
+    .where(
+      and(
+        eq(sessions.sessionId, sessionId),
+        eq(sessions.status, 'active'),
+        eq(sessions.serviceType, 'charging')
+      )
+    )
+    .returning({ sessionId: sessions.sessionId });
+
+  if (!updatedSession) {
+    throw new AuthValidationError('The selected active charging session could not be found.');
+  }
+
+  return fetchAdminStationActivityDb();
 }
 
 export async function getBootstrapData(
@@ -2002,6 +2033,11 @@ export async function createUnlockTokenDb(params: {
   const totalFee = resolvedTier.fee;
 
   const validPayment = normalizePaymentMethod(params.paymentMethod);
+  if (validPayment === 'wallet') {
+    throw new AuthValidationError(
+      'Campus E-Wallet is no longer available for locker bookings. Choose GCash, Maya, GoTyme Bank, or Kiosk Coin Slot.'
+    );
+  }
 
   const actorRows = await db.select().from(users).where(eq(users.uid, params.uid));
   const actor = actorRows[0];
@@ -2039,14 +2075,6 @@ export async function createUnlockTokenDb(params: {
     throw new AuthValidationError('UniCharge station was not found.');
   }
 
-  if (validPayment === 'wallet' && Number(actor.walletBalance) < totalFee) {
-    throw new AuthValidationError(
-      `Insufficient campus e-wallet balance (₱${Number(actor.walletBalance).toFixed(
-        2
-      )}). Please reload via GCash/Maya/GoTyme or select an online e-payment platform.`
-    );
-  }
-
   const insertedToken = await db.transaction(async (tx) => {
     const lockedActorRows = await tx
       .select()
@@ -2070,14 +2098,6 @@ export async function createUnlockTokenDb(params: {
         )}. Please retrieve your item and end your session before using another compartment.`
       );
     }
-    if (validPayment === 'wallet' && Number(lockedActor.walletBalance) < totalFee) {
-      throw new AuthValidationError(
-        `Insufficient campus e-wallet balance (₱${Number(lockedActor.walletBalance).toFixed(
-          2
-        )}). Please reload via GCash/Maya/GoTyme or select an online e-payment platform.`
-      );
-    }
-
     // Release any prior unused reservation held by this student first
     const priorTokens = await tx
       .update(lockerUnlockTokens)
@@ -3293,8 +3313,10 @@ export async function startSessionDb(params: {
         );
       }
 
-      if (!Number.isFinite(params.deductWalletAmount) || params.deductWalletAmount < 0) {
-        throw new AuthValidationError('Invalid wallet payment amount.');
+      if (!Number.isFinite(params.deductWalletAmount) || params.deductWalletAmount !== 0) {
+        throw new AuthValidationError(
+          'Campus E-Wallet is no longer available for locker bookings. Choose another payment method.'
+        );
       }
 
       const resolvedTier = resolvePricingTier({
@@ -3304,24 +3326,7 @@ export async function startSessionDb(params: {
         slotNumber: params.session.slotNumber,
       });
 
-      let finalUser = existingUser;
-      if (params.deductWalletAmount > 0) {
-        if (!hasExactCurrencyAmount(params.deductWalletAmount, resolvedTier.fee)) {
-          throw new AuthValidationError('Wallet payment does not match the session fee.');
-        }
-        const currentBalance = Number(existingUser.walletBalance);
-        if (currentBalance < resolvedTier.fee) {
-          throw new AuthValidationError(
-            `Insufficient campus e-wallet balance (₱${currentBalance.toFixed(2)}).`
-          );
-        }
-        const updatedUser = await tx
-          .update(users)
-          .set({ walletBalance: currentBalance - resolvedTier.fee })
-          .where(eq(users.uid, params.uid))
-          .returning();
-        finalUser = updatedUser[0];
-      }
+      const finalUser = existingUser;
 
       const slotRows = await tx
         .select()

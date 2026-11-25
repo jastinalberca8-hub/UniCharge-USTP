@@ -56,6 +56,7 @@ export interface KioskStation {
 }
 
 export type PaymentMethod = 'wallet' | 'gcash' | 'maya' | 'gotyme' | 'cash';
+export type BookingPaymentMethod = Exclude<PaymentMethod, 'wallet'>;
 
 export interface PendingUnlockToken {
   tokenId: string;
@@ -204,6 +205,7 @@ export interface AdminStationTransaction {
   id: string;
   kind: 'reserved' | 'active' | 'expired' | 'completed';
   userUid: string | null;
+  stationId: string;
   userName: string;
   studentIdNumber: string;
   slotNumber: number;
@@ -211,6 +213,7 @@ export interface AdminStationTransaction {
   pricingTier: string;
   totalFee: number;
   paymentMethod?: string;
+  batteryCurrent?: number;
   createdAtMs: number;
   expiresAtMs?: number;
   remainingSeconds?: number;

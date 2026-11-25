@@ -274,7 +274,7 @@ export const PortalLayout: React.FC = () => {
           {!isAdmin && (
             <button
               onClick={() => handleSelectNav('wallet')}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#EBF9F3] border border-[#5BC496]/40 hover:border-[#48AD80] text-xs font-mono font-bold text-[#1E293B] cursor-pointer transition-colors"
+              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#EBF9F3] border border-[#5BC496]/40 hover:border-[#48AD80] text-xs font-mono font-bold text-[#1E293B] cursor-pointer transition-colors"
             >
               <Wallet className="w-3.5 h-3.5 text-[#4E6E81]" />
               <span>₱{currentUser.walletBalance.toFixed(2)}</span>

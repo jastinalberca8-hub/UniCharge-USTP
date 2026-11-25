@@ -110,6 +110,7 @@ function toTimestampMs(val: unknown): number {
 
 export interface CreateNotificationInput {
   id: string;
+  targetUserUid?: string;
   sessionId: string;
   stationId: string;
   stationCode: string;
@@ -134,7 +135,7 @@ export async function createFirestoreNotification(
   const slotNumber = Math.min(64, Math.max(1, Math.trunc(Number(input.slotNumber) || 1)));
 
   const payload = {
-    userUid: sanitizeId(fbUser.uid, fbUser.uid, 128),
+    userUid: sanitizeId(input.targetUserUid || fbUser.uid, fbUser.uid, 128),
     sessionId: sanitizeId(input.sessionId, `SES_${Date.now()}`, 64),
     stationId: sanitizeId(input.stationId, 'unicharge-station-01', 64),
     stationCode: sanitizeId(input.stationCode, 'USTP-UNICHARGE-01', 32),

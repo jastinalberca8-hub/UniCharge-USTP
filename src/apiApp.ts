@@ -12,6 +12,7 @@ import {
   AuthValidationError,
   adminCreateSessionDoorNotificationDb,
   adminProvisionStaffDb,
+  adminRetrieveOverdueSessionDb,
   adminResolveAlertDb,
   adminSimulateSessionFullChargeDb,
   adminUpdateSlotDb,
@@ -638,6 +639,9 @@ apiApp.post('/api/sessions/end', requireAuth, async (req: AuthRequest, res) => {
     });
     res.json({ ok: true, stations });
   } catch (error: unknown) {
+    if (error instanceof AuthValidationError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     const message = error instanceof Error ? error.message : 'Failed to end session';
     console.error('End session route error:', error);
     res.status(500).json({ error: message });
@@ -694,6 +698,39 @@ apiApp.post('/api/admin/sessions/simulate-full-charge', requireAuth, async (req:
     }
     const message = error instanceof Error ? error.message : 'Failed to simulate full charge';
     console.error('Admin full-charge simulation error:', error);
+    res.status(500).json({ error: message });
+  }
+});
+
+apiApp.post('/api/admin/sessions/retrieve-overdue', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const uid = req.user!.uid;
+    const email = req.user!.email || '';
+    const bootstrap = await getBootstrapData(uid, email);
+    if (bootstrap.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: Admin access required' });
+    }
+
+    const sessionId =
+      typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+    if (!sessionId) {
+      return res.status(400).json({ error: 'A session ID is required.' });
+    }
+    const action = req.body?.action === 'open' || req.body?.action === 'complete'
+      ? req.body.action
+      : null;
+    if (!action) {
+      return res.status(400).json({ error: 'A valid retrieval action is required.' });
+    }
+
+    const result = await adminRetrieveOverdueSessionDb(sessionId, action);
+    res.json({ ok: true, ...result });
+  } catch (error: unknown) {
+    if (error instanceof AuthValidationError) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    const message = error instanceof Error ? error.message : 'Failed to retrieve belongings.';
+    console.error('Admin overdue retrieval error:', error);
     res.status(500).json({ error: message });
   }
 });

@@ -19,6 +19,7 @@ import {
 } from '../constants/colleges.ts';
 import {
   UNICHARGE_STATION_CODE,
+  UNICHARGE_ADMIN_DESK,
   UNICHARGE_STATION_ID,
   UNICHARGE_STATION_NAME,
   formatCompartmentCode,
@@ -1518,7 +1519,9 @@ export async function fetchUserSessionState(userUid: string): Promise<{
       .where(eq(sessions.userUid, userUid))
       .orderBy(desc(sessions.createdAt));
 
-    const activeRow = rows.find((r) => r.status === 'active');
+    const activeRow = rows.find(
+      (r) => r.status === 'active' || r.status === 'admin_retrieving'
+    );
     const activeSession: ActiveSession | null = activeRow
       ? {
           sessionId: activeRow.sessionId,
@@ -1546,13 +1549,14 @@ export async function fetchUserSessionState(userUid: string): Promise<{
           lockerTemperature: activeRow.lockerTemperature,
           isOverchargeProtectionActive: activeRow.isOverchargeProtectionActive,
           isTamperAlertArmed: activeRow.isTamperAlertArmed,
+          adminRetrievalInProgress: activeRow.status === 'admin_retrieving',
           status: 'active',
           qrVerificationCode: activeRow.qrVerificationCode,
         }
       : null;
 
     const history: SessionHistoryItem[] = rows
-      .filter((r) => r.status !== 'active')
+      .filter((r) => r.status !== 'active' && r.status !== 'admin_retrieving')
       .map((r) => {
         const storedLabel = (r.dateLabel || '').trim();
         const isGenericJustNow =
@@ -1687,64 +1691,136 @@ async function recordWalletTransaction(
   });
 }
 
+const ADMIN_RETRIEVAL_GRACE_MS = 60 * 60 * 1000;
+
+async function createExpiredSessionNotificationsDb(): Promise<void> {
+  const nowMs = Date.now();
+  const expiredSessions = await db
+    .select({
+      sessionId: sessions.sessionId,
+      userUid: sessions.userUid,
+      stationId: sessions.stationId,
+      stationName: sessions.stationName,
+      slotNumber: sessions.slotNumber,
+      durationMinutes: sessions.durationMinutes,
+    })
+    .from(sessions)
+    .where(
+      and(
+        eq(sessions.status, 'active'),
+        sql`${sessions.startTimeMs} + (${sessions.durationMinutes} * 60000) <= ${nowMs}`
+      )
+    );
+
+  const sessionsWithUsers = expiredSessions.filter(
+    (session): session is typeof session & { userUid: string } =>
+      Boolean(session.userUid)
+  );
+  if (sessionsWithUsers.length === 0) return;
+
+  const notificationRows = sessionsWithUsers.map((session) => ({
+    id: `session_expired_${session.sessionId}`.slice(0, 128),
+    userUid: session.userUid,
+    sessionId: session.sessionId,
+    stationId: session.stationId,
+    stationCode: UNICHARGE_STATION_CODE,
+    stationName: session.stationName || UNICHARGE_STATION_NAME,
+    slotNumber: session.slotNumber,
+    type: 'session_expired',
+    severity: 'warning',
+    title: 'Locker time is up — please retrieve your belongings',
+    message: `${formatCompartmentLabel(session.slotNumber)} at ${
+      session.stationName || UNICHARGE_STATION_NAME
+    } has reached the end of its allotted time. Please retrieve your belongings now. If they remain in the locker for another hour, an admin may collect them and hold them at ${UNICHARGE_ADMIN_DESK}.`,
+    read: false,
+  }));
+  const existingNotifications = await db
+    .select({ id: userNotifications.id })
+    .from(userNotifications)
+    .where(inArray(userNotifications.id, notificationRows.map((row) => row.id)));
+  const existingIds = new Set(existingNotifications.map((notification) => notification.id));
+  const missingNotifications = notificationRows.filter(
+    (notification) => !existingIds.has(notification.id)
+  );
+
+  if (missingNotifications.length > 0) {
+    await db
+      .insert(userNotifications)
+      .values(missingNotifications)
+      .onConflictDoNothing();
+  }
+}
+
 export async function fetchAdminStationActivityDb(): Promise<AdminStationActivity> {
   try {
     const now = new Date();
-    const [allUsers, recentSessionRows, activeTokenRows] = await Promise.all([
-      db.select().from(users),
-      db.select().from(sessions).orderBy(desc(sessions.createdAt)).limit(25),
-      db
-        .select()
-        .from(lockerUnlockTokens)
-        .where(
-          and(
-            eq(lockerUnlockTokens.used, false),
-            gt(lockerUnlockTokens.expiresAt, now)
+    const [allUsers, recentSessionRows, activeSessionRows, activeTokenRows] =
+      await Promise.all([
+        db.select().from(users),
+        db.select().from(sessions).orderBy(desc(sessions.createdAt)).limit(25),
+        db
+          .select()
+          .from(sessions)
+          .where(
+            or(
+              eq(sessions.status, 'active'),
+              eq(sessions.status, 'admin_retrieving')
+            )
+          ),
+        db
+          .select()
+          .from(lockerUnlockTokens)
+          .where(
+            and(
+              eq(lockerUnlockTokens.used, false),
+              gt(lockerUnlockTokens.expiresAt, now)
+            )
           )
-        )
-        .orderBy(desc(lockerUnlockTokens.createdAt)),
-    ]);
+          .orderBy(desc(lockerUnlockTokens.createdAt)),
+      ]);
 
     const userByUid = new Map(allUsers.map((u) => [u.uid, u]));
 
-    const activeSessions: AdminStationTransaction[] = recentSessionRows
-      .filter((r) => r.status === 'active')
-      .map((r) => {
-        const owner = r.userUid ? userByUid.get(r.userUid) : undefined;
-        const resolvedMethod =
-          r.paymentMethod === 'cash' || r.qrVerificationCode?.includes('|COIN-')
-            ? 'cash'
-            : r.paymentMethod === 'gcash' || r.paymentMethod === 'maya' || r.paymentMethod === 'gotyme'
-            ? r.paymentMethod
-            : 'wallet';
+    const activeSessions: AdminStationTransaction[] = activeSessionRows.map((r) => {
+      const owner = r.userUid ? userByUid.get(r.userUid) : undefined;
+      const resolvedMethod =
+        r.paymentMethod === 'cash' || r.qrVerificationCode?.includes('|COIN-')
+          ? 'cash'
+          : r.paymentMethod === 'gcash' || r.paymentMethod === 'maya' || r.paymentMethod === 'gotyme'
+          ? r.paymentMethod
+          : 'wallet';
 
-        const remainingSeconds = getRemainingSessionSeconds(
-          r.startTimeMs,
-          r.durationMinutes
-        );
+      const remainingSeconds = getRemainingSessionSeconds(
+        r.startTimeMs,
+        r.durationMinutes
+      );
+      const sessionEndsAtMs = r.startTimeMs + r.durationMinutes * 60_000;
 
-        return {
-          id: r.sessionId,
-          kind: remainingSeconds > 0 ? 'active' : 'expired',
-          userUid: r.userUid ?? null,
-          stationId: r.stationId,
-          userName: owner?.name || 'USTP Student',
-          studentIdNumber: owner?.studentIdNumber || '—',
+      return {
+        id: r.sessionId,
+        kind: remainingSeconds > 0 ? 'active' : 'expired',
+        userUid: r.userUid ?? null,
+        stationId: r.stationId,
+        userName: owner?.name || 'USTP Student',
+        studentIdNumber: owner?.studentIdNumber || '—',
+        slotNumber: r.slotNumber,
+        serviceType: normalizeServiceType(r.serviceType, r.slotNumber),
+        pricingTier: resolvePricingTier({
+          tierId: r.compartmentSize,
+          serviceType: r.serviceType,
+          durationMinutes: r.durationMinutes,
           slotNumber: r.slotNumber,
-          serviceType: normalizeServiceType(r.serviceType, r.slotNumber),
-          pricingTier: resolvePricingTier({
-            tierId: r.compartmentSize,
-            serviceType: r.serviceType,
-            durationMinutes: r.durationMinutes,
-            slotNumber: r.slotNumber,
-          }).name,
-          totalFee: Number(r.totalFee),
-          paymentMethod: resolvedMethod,
-          batteryCurrent: r.batteryCurrent,
-          createdAtMs: r.startTimeMs || r.createdAt.getTime(),
-          remainingSeconds,
-        };
-      });
+        }).name,
+        totalFee: Number(r.totalFee),
+        paymentMethod: resolvedMethod,
+        batteryCurrent: r.batteryCurrent,
+        createdAtMs: r.startTimeMs || r.createdAt.getTime(),
+        sessionEndsAtMs,
+        retrievalAvailableAtMs: sessionEndsAtMs + ADMIN_RETRIEVAL_GRACE_MS,
+        retrievalInProgress: r.status === 'admin_retrieving',
+        remainingSeconds,
+      };
+    });
 
     const pendingReservations: AdminStationTransaction[] = activeTokenRows.map((t) => {
       const owner = userByUid.get(t.userUid);
@@ -1780,15 +1856,19 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
             ? r.paymentMethod
             : 'wallet';
 
+        const isOngoing =
+          r.status === 'active' || r.status === 'admin_retrieving';
         const remainingSeconds =
-          r.status === 'active'
+          isOngoing
             ? getRemainingSessionSeconds(r.startTimeMs, r.durationMinutes)
             : undefined;
+        const sessionEndsAtMs =
+          r.startTimeMs + r.durationMinutes * 60_000;
 
         return {
           id: r.sessionId,
           kind:
-            r.status !== 'active'
+            !isOngoing
               ? 'completed'
               : remainingSeconds && remainingSeconds > 0
               ? 'active'
@@ -1809,6 +1889,13 @@ export async function fetchAdminStationActivityDb(): Promise<AdminStationActivit
           paymentMethod: resolvedMethod,
           batteryCurrent: r.batteryCurrent,
           createdAtMs: r.startTimeMs || r.createdAt.getTime(),
+          ...(isOngoing
+            ? {
+                sessionEndsAtMs,
+                retrievalAvailableAtMs: sessionEndsAtMs + ADMIN_RETRIEVAL_GRACE_MS,
+                retrievalInProgress: r.status === 'admin_retrieving',
+              }
+            : {}),
           remainingSeconds,
         };
       }
@@ -1855,6 +1942,129 @@ export async function adminSimulateSessionFullChargeDb(
   return fetchAdminStationActivityDb();
 }
 
+export async function adminRetrieveOverdueSessionDb(
+  sessionId: string,
+  action: 'open' | 'complete'
+): Promise<{
+  stations: KioskStation[];
+  adminStationActivity: AdminStationActivity;
+}> {
+  const cleanSessionId = sessionId.trim();
+  if (!cleanSessionId) {
+    throw new AuthValidationError('A session ID is required.');
+  }
+
+  await db.transaction(async (tx) => {
+    const [session] = await tx
+      .select()
+      .from(sessions)
+      .where(
+        and(
+          eq(sessions.sessionId, cleanSessionId),
+          eq(sessions.status, action === 'open' ? 'active' : 'admin_retrieving')
+        )
+      )
+      .limit(1);
+
+    if (!session) {
+      throw new AuthValidationError(
+        action === 'open'
+          ? 'This locker session is no longer active.'
+          : 'Open the locker and transfer the belongings before confirming collection.'
+      );
+    }
+
+    if (action === 'open') {
+      const retrievalAvailableAtMs =
+        session.startTimeMs +
+        session.durationMinutes * 60_000 +
+        ADMIN_RETRIEVAL_GRACE_MS;
+      if (Date.now() < retrievalAvailableAtMs) {
+        throw new AuthValidationError(
+          'Admin collection is available one hour after the allotted locker time ends.'
+        );
+      }
+    }
+
+    const [updatedSession] = await tx
+      .update(sessions)
+      .set({
+        status: action === 'open' ? 'admin_retrieving' : 'admin_retrieved',
+        ...(action === 'complete'
+          ? {
+              remainingSeconds: 0,
+              receiptNumber: `USTP-REC-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+              dateLabel: formatSessionDateTime(new Date()),
+            }
+          : {}),
+      })
+      .where(
+        and(
+          eq(sessions.sessionId, cleanSessionId),
+          eq(sessions.status, action === 'open' ? 'active' : 'admin_retrieving')
+        )
+      )
+      .returning({ sessionId: sessions.sessionId });
+
+    if (!updatedSession) {
+      throw new AuthValidationError('This locker session has already been updated.');
+    }
+
+    const [updatedSlot] = await tx
+      .update(lockerSlots)
+      .set(
+        action === 'open'
+          ? { status: 'in_use', isDoorOpen: true, isLocked: false }
+          : { status: 'available', isDoorOpen: false, isLocked: true }
+      )
+      .where(
+        and(
+          eq(lockerSlots.stationId, session.stationId),
+          eq(lockerSlots.slotNumber, session.slotNumber)
+        )
+      )
+      .returning({ id: lockerSlots.id });
+
+    if (!updatedSlot) {
+      throw new Error('The locker compartment could not be released.');
+    }
+
+    if (action === 'complete' && session.userUid) {
+      const [station] = await tx
+        .select({ campusCode: stations.campusCode })
+        .from(stations)
+        .where(eq(stations.id, session.stationId))
+        .limit(1);
+
+      await tx
+        .insert(userNotifications)
+        .values({
+          id: `belongings_collected_${session.sessionId}`.slice(0, 128),
+          userUid: session.userUid,
+          sessionId: session.sessionId,
+          stationId: session.stationId,
+          stationCode: station?.campusCode || UNICHARGE_STATION_CODE,
+          stationName: session.stationName || UNICHARGE_STATION_NAME,
+          slotNumber: session.slotNumber,
+          type: 'belongings_collected',
+          severity: 'info',
+          title: 'Your belongings are being held for you',
+          message: `An admin collected your belongings from ${formatCompartmentLabel(
+            session.slotNumber
+          )} at ${session.stationName || UNICHARGE_STATION_NAME}. Please collect them from the ${UNICHARGE_ADMIN_DESK} and show your student ID.`,
+          read: false,
+        })
+        .onConflictDoNothing();
+    }
+  });
+
+  const [stationList, adminStationActivity] = await Promise.all([
+    fetchStationsWithSlots(),
+    fetchAdminStationActivityDb(),
+  ]);
+  return { stations: stationList, adminStationActivity };
+}
+
 function mapUserNotificationRow(
   row: typeof userNotifications.$inferSelect
 ): DashboardNotification {
@@ -1866,8 +2076,18 @@ function mapUserNotificationRow(
     stationCode: row.stationCode,
     stationName: row.stationName,
     slotNumber: row.slotNumber,
-    type: row.type === 'charge_complete' ? 'charge_complete' : 'unexpected_door_open',
-    severity: row.severity === 'critical' ? 'critical' : 'info',
+    type:
+      row.type === 'charge_complete' ||
+      row.type === 'session_expired' ||
+      row.type === 'belongings_collected'
+        ? row.type
+        : 'unexpected_door_open',
+    severity:
+      row.severity === 'critical'
+        ? 'critical'
+        : row.severity === 'warning'
+        ? 'warning'
+        : 'info',
     title: row.title,
     message: row.message,
     read: row.read,
@@ -1975,6 +2195,7 @@ export async function getBootstrapData(
 ) {
   await ensureCatalogSeeded();
   await releaseExpiredReservationsDb();
+  await createExpiredSessionNotificationsDb();
   const user = await getOrCreateUser(uid, email, displayName);
   const [stationList, alertList, userSessions, walletTxList] = await Promise.all([
     fetchStationsWithSlots(),
@@ -2027,6 +2248,7 @@ export async function getBootstrapData(
 
 export async function getStationSyncStateDb(uid: string, email: string) {
   await ensureCatalogSeeded();
+  await createExpiredSessionNotificationsDb();
   const existingRows = await db.select().from(users).where(eq(users.uid, uid));
   const actor = existingRows[0]
     ? mapUserRow(existingRows[0])
@@ -3562,7 +3784,7 @@ export async function endSessionDb(params: {
   dateLabel: string;
 }): Promise<KioskStation[]> {
   try {
-    await db
+    const [endedSession] = await db
       .update(sessions)
       .set({
         status: 'completed',
@@ -3573,9 +3795,15 @@ export async function endSessionDb(params: {
       .where(
         and(
           eq(sessions.userUid, params.uid),
-          eq(sessions.sessionId, params.sessionId)
+          eq(sessions.sessionId, params.sessionId),
+          eq(sessions.status, 'active')
         )
-      );
+      )
+      .returning({ sessionId: sessions.sessionId });
+
+    if (!endedSession) {
+      throw new AuthValidationError('This locker session is no longer active.');
+    }
 
     await db
       .update(lockerSlots)
@@ -3589,6 +3817,7 @@ export async function endSessionDb(params: {
 
     return fetchStationsWithSlots();
   } catch (error) {
+    if (error instanceof AuthValidationError) throw error;
     console.error('Database end session failed:', error);
     throw new Error('Failed to end locker session.', { cause: error });
   }
@@ -3760,7 +3989,10 @@ export async function adminUpdateSlotDb(params: {
               and(
                 eq(sessions.stationId, params.stationId),
                 eq(sessions.slotNumber, params.slotNumber),
-                eq(sessions.status, 'active')
+                or(
+                  eq(sessions.status, 'active'),
+                  eq(sessions.status, 'admin_retrieving')
+                )
               )
             )
             .limit(1),
@@ -3799,7 +4031,10 @@ export async function adminUpdateSlotDb(params: {
               and(
                 eq(sessions.stationId, params.stationId),
                 eq(sessions.slotNumber, params.slotNumber),
-                eq(sessions.status, 'active')
+                or(
+                  eq(sessions.status, 'active'),
+                  eq(sessions.status, 'admin_retrieving')
+                )
               )
             )
             .limit(1),

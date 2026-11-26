@@ -68,8 +68,8 @@ service cloud.firestore {
         && data.stationCode is string && data.stationCode.size() >= 1 && data.stationCode.size() <= 32 && data.stationCode.matches('^[a-zA-Z0-9_\\-]+$')
         && data.stationName is string && data.stationName.size() >= 1 && data.stationName.size() <= 120
         && data.slotNumber is int && data.slotNumber >= 1 && data.slotNumber <= 64
-        && data.type in ['charge_complete', 'unexpected_door_open']
-        && data.severity in ['info', 'critical']
+        && data.type in ['charge_complete', 'unexpected_door_open', 'session_expired', 'belongings_collected']
+        && data.severity in ['info', 'warning', 'critical']
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
         && data.message is string && data.message.size() >= 1 && data.message.size() <= 400
         && data.read is bool
@@ -99,7 +99,7 @@ service cloud.firestore {
         && isValidNotification(incoming())
         && (
           incoming().userUid == request.auth.uid ||
-          (isAdmin() && incoming().type in ['charge_complete', 'unexpected_door_open'])
+          (isAdmin() && incoming().type in ['charge_complete', 'unexpected_door_open', 'session_expired', 'belongings_collected'])
         )
         && incoming().read == false
         && incoming().createdAt == request.time

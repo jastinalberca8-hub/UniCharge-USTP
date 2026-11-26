@@ -28,6 +28,7 @@ import {
   UNICHARGE_STATION_CODE,
   UNICHARGE_STATION_ID,
   UNICHARGE_STATION_NAME,
+  UNICHARGE_ADMIN_DESK,
   formatCompartmentCode,
   formatCompartmentLabel,
   getDefaultTierForService,
@@ -243,6 +244,10 @@ interface UniChargeContextType {
   ) => Promise<{ success: boolean; message?: string }>;
   adminSimulateSessionFullCharge: (
     sessionId: string
+  ) => Promise<{ success: boolean; message: string }>;
+  adminRetrieveOverdueSession: (
+    sessionId: string,
+    action: 'open' | 'complete'
   ) => Promise<{ success: boolean; message: string }>;
   adminProvisionStaff: (params: {
     name: string;
@@ -691,15 +696,26 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             return localActive === null ? prevMap : { ...prevMap, [syncedUser.id]: null };
           }
           if (localActive && localActive.sessionId === serverActive.sessionId) {
-            if (serverActive.batteryCurrent > localActive.batteryCurrent) {
+            const retrievalInProgress = Boolean(
+              serverActive.adminRetrievalInProgress
+            );
+            if (
+              serverActive.batteryCurrent > localActive.batteryCurrent ||
+              retrievalInProgress !== Boolean(localActive.adminRetrievalInProgress)
+            ) {
               return {
                 ...prevMap,
                 [syncedUser.id]: {
                   ...localActive,
-                  batteryCurrent: serverActive.batteryCurrent,
-                  chargingRateWatts: serverActive.chargingRateWatts,
-                  isOverchargeProtectionActive:
-                    serverActive.isOverchargeProtectionActive,
+                  ...(serverActive.batteryCurrent > localActive.batteryCurrent
+                    ? {
+                        batteryCurrent: serverActive.batteryCurrent,
+                        chargingRateWatts: serverActive.chargingRateWatts,
+                        isOverchargeProtectionActive:
+                          serverActive.isOverchargeProtectionActive,
+                      }
+                    : {}),
+                  adminRetrievalInProgress: retrievalInProgress,
                 },
               };
             }
@@ -2524,6 +2540,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const endActiveSession = (): { success: boolean; message: string } => {
     if (!activeSession) return { success: false, message: 'No active session' };
+    if (activeSession.adminRetrievalInProgress) {
+      return {
+        success: false,
+        message: 'An admin is already retrieving your belongings. Please collect them from the UniCharge Admin Desk when notified.',
+      };
+    }
 
     sound.playSolenoidRelease();
     setHardwareKioskStationId(activeSession.stationId);
@@ -3103,7 +3125,6 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     const activeSession = adminStationActivity.activeSessions.find(
       (session) =>
-        session.kind === 'active' &&
         session.stationId === stationId &&
         session.slotNumber === slotNumber
     );
@@ -3112,7 +3133,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         success: false,
         message: `${formatCompartmentLabel(
           slotNumber
-        )} has an active session. Force Free was blocked to protect it.`,
+        )} has an active or overdue session. Use the overdue retrieval workflow instead.`,
       };
     }
 
@@ -3313,6 +3334,66 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   };
 
+  const adminRetrieveOverdueSession = async (
+    sessionId: string,
+    action: 'open' | 'complete'
+  ): Promise<{ success: boolean; message: string }> => {
+    if (currentUser?.role !== 'admin') {
+      return { success: false, message: 'Admin privileges required.' };
+    }
+    if (!isBackendSessionRef.current) {
+      return {
+        success: false,
+        message: 'A database connection is required to record an admin collection.',
+      };
+    }
+
+    try {
+      const data = await authorizedFetch('/api/admin/sessions/retrieve-overdue', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId, action }),
+      });
+      if (!Array.isArray(data?.stations) || !data.adminStationActivity) {
+        throw new Error('Locker release status was not returned.');
+      }
+
+      const nextStations = data.stations as KioskStation[];
+      setStations(nextStations);
+      setSelectedStation(
+        (prev) => nextStations.find((station) => station.id === prev.id) || nextStations[0]
+      );
+      setAdminStationActivity(data.adminStationActivity as AdminStationActivity);
+      const collectedSession = adminStationActivity.activeSessions.find(
+        (session) => session.id === sessionId
+      );
+      if (collectedSession) {
+        setHardwareKioskStationId(collectedSession.stationId);
+        setIsKioskDoorOpen(action === 'open');
+        setActiveKioskSlotReleased(
+          action === 'open' ? collectedSession.slotNumber : null
+        );
+      }
+      if (action === 'open') sound.playSolenoidRelease();
+      else sound.playTap();
+      notifyStationSync();
+      return {
+        success: true,
+        message:
+          action === 'open'
+            ? `Locker unlocked. Move the belongings to ${UNICHARGE_ADMIN_DESK}, then confirm the collection.`
+            : collectedSession?.userUid
+            ? `Belongings marked collected and locker released. Student notified to collect items at ${UNICHARGE_ADMIN_DESK}.`
+            : `Belongings marked collected and locker released at ${UNICHARGE_ADMIN_DESK}. No student account was linked to this session.`,
+      };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to record admin collection.';
+      console.error('Admin overdue retrieval failed:', error);
+      void syncStationState();
+      return { success: false, message };
+    }
+  };
+
   const adminProvisionStaff = async ({
     name,
     email,
@@ -3455,6 +3536,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         adminRemoteUnlockSlot,
         adminToggleSlotMaintenance,
         adminSimulateSessionFullCharge,
+        adminRetrieveOverdueSession,
         adminProvisionStaff,
         resolveSecurityAlert,
       }}

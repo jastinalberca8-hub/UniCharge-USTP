@@ -99,6 +99,7 @@ export interface ActiveSession {
   lockerTemperature: number;
   isOverchargeProtectionActive: boolean;
   isTamperAlertArmed: boolean;
+  adminRetrievalInProgress?: boolean;
   status: 'active' | 'completed' | 'retrieved';
   qrVerificationCode: string;
 }
@@ -180,9 +181,13 @@ export interface SecurityAlert {
   resolved: boolean;
 }
 
-export type DashboardNotificationType = 'charge_complete' | 'unexpected_door_open';
+export type DashboardNotificationType =
+  | 'charge_complete'
+  | 'unexpected_door_open'
+  | 'session_expired'
+  | 'belongings_collected';
 
-export type DashboardNotificationSeverity = 'info' | 'critical';
+export type DashboardNotificationSeverity = 'info' | 'warning' | 'critical';
 
 export interface DashboardNotification {
   id: string;
@@ -216,6 +221,9 @@ export interface AdminStationTransaction {
   batteryCurrent?: number;
   createdAtMs: number;
   expiresAtMs?: number;
+  sessionEndsAtMs?: number;
+  retrievalAvailableAtMs?: number;
+  retrievalInProgress?: boolean;
   remainingSeconds?: number;
 }
 

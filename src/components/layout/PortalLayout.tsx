@@ -24,6 +24,8 @@ import {
   ChevronRight,
   Check,
   Trash2,
+  AlertTriangle,
+  PackageCheck,
 } from 'lucide-react';
 import { StudentPortalView, StudentSection } from '../portal/StudentPortalView';
 import { AdminPortalView, AdminSection } from '../portal/AdminPortalView';
@@ -366,12 +368,14 @@ export const PortalLayout: React.FC = () => {
                           : 'No real-time alerts yet'}
                       </span>
                       <span className="text-[#64748B] text-[11px] block">
-                        You will be alerted instantly when battery reaches 100% or if a locker door opens unexpectedly.
+                        You will be alerted when your device is fully charged, locker time ends, belongings are moved to the Admin Desk, or a locker door opens unexpectedly.
                       </span>
                     </div>
                   ) : (
                     notifications.slice(0, 10).map((n) => {
                       const isCritical = n.type === 'unexpected_door_open';
+                      const isRetrievalReminder = n.type === 'session_expired';
+                      const isBelongingsCollected = n.type === 'belongings_collected';
                       return (
                         <div
                           key={n.id}
@@ -380,6 +384,10 @@ export const PortalLayout: React.FC = () => {
                               ? n.read
                                 ? 'bg-red-50/40 border-red-200/70'
                                 : 'bg-red-50 border-[#DC2626]/50'
+                              : isRetrievalReminder
+                              ? n.read
+                              ? 'bg-amber-50/40 border-amber-200/70'
+                              : 'bg-amber-50 border-amber-300'
                               : n.read
                               ? 'bg-[#F8FAFC] border-[#E2E8F0]'
                               : 'bg-[#EBF9F3] border-[#5BC496]/50'
@@ -389,6 +397,10 @@ export const PortalLayout: React.FC = () => {
                             <div className="flex items-start gap-2 min-w-0">
                               {isCritical ? (
                                 <ShieldAlert className="w-4 h-4 text-[#DC2626] shrink-0 mt-0.5" />
+                              ) : isRetrievalReminder ? (
+                                <AlertTriangle className="w-4 h-4 text-[#B45309] shrink-0 mt-0.5" />
+                              ) : isBelongingsCollected ? (
+                                <PackageCheck className="w-4 h-4 text-[#15803D] shrink-0 mt-0.5" />
                               ) : (
                                 <BatteryCharging className="w-4 h-4 text-[#5BC496] shrink-0 mt-0.5" />
                               )}
@@ -508,6 +520,8 @@ export const PortalLayout: React.FC = () => {
             >
               {liveToastNotifications.map((toast) => {
                 const isCritical = toast.type === 'unexpected_door_open';
+                const isRetrievalReminder = toast.type === 'session_expired';
+                const isBelongingsCollected = toast.type === 'belongings_collected';
                 return (
                   <div
                     key={toast.id}
@@ -515,16 +529,26 @@ export const PortalLayout: React.FC = () => {
                     className={`pointer-events-auto rounded-2xl border shadow-2xl p-4 bg-[#FFFFFF] flex items-start gap-3 ${
                       isCritical
                         ? 'border-[#DC2626] border-l-4 border-l-[#DC2626]'
+                        : isRetrievalReminder
+                        ? 'border-amber-400 border-l-4 border-l-amber-500'
                         : 'border-[#5BC496] border-l-4 border-l-[#5BC496]'
                     }`}
                   >
                     <div
                       className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                        isCritical ? 'bg-red-50 text-[#DC2626]' : 'bg-[#EBF9F3] text-[#4E6E81]'
+                        isCritical
+                          ? 'bg-red-50 text-[#DC2626]'
+                          : isRetrievalReminder
+                          ? 'bg-amber-50 text-[#B45309]'
+                          : 'bg-[#EBF9F3] text-[#4E6E81]'
                       }`}
                     >
                       {isCritical ? (
                         <ShieldAlert className="w-5 h-5 text-[#DC2626]" />
+                      ) : isRetrievalReminder ? (
+                        <AlertTriangle className="w-5 h-5 text-[#B45309]" />
+                      ) : isBelongingsCollected ? (
+                        <PackageCheck className="w-5 h-5 text-[#15803D]" />
                       ) : (
                         <BatteryCharging className="w-5 h-5 text-[#5BC496]" />
                       )}
@@ -533,10 +557,20 @@ export const PortalLayout: React.FC = () => {
                       <div className="flex items-center justify-between gap-2">
                         <span
                           className={`text-[10px] font-bold uppercase tracking-wider ${
-                            isCritical ? 'text-[#DC2626]' : 'text-[#5BC496]'
+                            isCritical
+                              ? 'text-[#DC2626]'
+                              : isRetrievalReminder
+                              ? 'text-[#B45309]'
+                              : 'text-[#5BC496]'
                           }`}
                         >
-                          {isCritical ? 'Security Alert · Live' : 'Charging Complete · Live'}
+                          {isCritical
+                            ? 'Security Alert · Live'
+                            : isRetrievalReminder
+                            ? 'Locker Retrieval Reminder · Live'
+                            : isBelongingsCollected
+                            ? 'Belongings Collected · Live'
+                            : 'Charging Complete · Live'}
                         </span>
                         <button
                           type="button"
@@ -561,10 +595,16 @@ export const PortalLayout: React.FC = () => {
                           className={`px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer ${
                             isCritical
                               ? 'bg-[#DC2626] text-white hover:bg-red-700'
+                              : isRetrievalReminder
+                              ? 'bg-amber-600 text-white hover:bg-amber-700'
                               : 'bg-[#4E6E81] text-white hover:bg-[#3D5767]'
                           }`}
                         >
-                          {isCritical ? 'Check Kiosk' : 'Retrieve Device'}
+                          {isCritical
+                            ? 'Check Kiosk'
+                            : isBelongingsCollected
+                            ? 'View Sessions'
+                            : 'Retrieve Device'}
                         </button>
                         <button
                           type="button"

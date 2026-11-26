@@ -6,6 +6,7 @@ import {
   TOTAL_COMPARTMENT_COUNT,
   formatCompartmentLabel,
   getTiersForService,
+  UNICHARGE_ADMIN_DESK,
 } from '../../constants/pricing';
 import { sound } from '../../utils/audio';
 import { formatDuration, formatSessionTimer } from '../../utils/format';
@@ -138,6 +139,7 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
     selectedTier,
     setSelectedTier,
     activeSession,
+    notifications,
     pendingUnlockToken,
     pendingSecondsLeft,
     reservationTimeoutMessage,
@@ -176,6 +178,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
   const [selectedReceipt, setSelectedReceipt] = useState<SessionHistoryItem | null>(null);
 
   const station = stations[0] || selectedStation;
+  const latestCollectedBelongings = notifications.find(
+    (notification) => notification.type === 'belongings_collected'
+  );
   const chargingSlots = station.slots.filter((s) => s.category === 'charging');
   const storageSlots = station.slots.filter((s) => s.category === 'storage');
   const chargingFreeCount = chargingSlots.filter((s) => s.status === 'available').length;
@@ -413,6 +418,38 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
             </div>
           </div>
 
+          {activeSession?.remainingSeconds === 0 && (
+            <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-[#B45309] shrink-0 mt-0.5" />
+              <div>
+                <h2 className="text-sm font-bold text-[#92400E]">
+                  {activeSession.adminRetrievalInProgress
+                    ? 'An admin is retrieving your belongings'
+                    : 'Your locker time has ended — please retrieve your belongings'}
+                </h2>
+                <p className="text-xs text-[#78350F] mt-1 leading-relaxed">
+                  {activeSession.adminRetrievalInProgress
+                    ? `Your belongings are being transferred to the ${UNICHARGE_ADMIN_DESK}. Please wait for the collection notification.`
+                    : `Retrieve your items from ${formatCompartmentLabel(activeSession.slotNumber)} at ${activeSession.stationName} now. If they remain in the locker for one hour after your allotted time, an admin may collect them and keep them at the ${UNICHARGE_ADMIN_DESK}.`}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {latestCollectedBelongings && (
+            <div className="rounded-2xl border border-[#5BC496]/50 bg-[#EBF9F3] p-4 flex items-start gap-3">
+              <Package className="w-5 h-5 text-[#15803D] shrink-0 mt-0.5" />
+              <div>
+                <h2 className="text-sm font-bold text-[#166534]">
+                  Your belongings are ready for collection
+                </h2>
+                <p className="text-xs text-[#166534] mt-1 leading-relaxed">
+                  {latestCollectedBelongings.message}
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* KPI Strip */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="bg-[#FFFFFF] p-5 rounded-2xl border border-[#E2E8F0]">
@@ -481,7 +518,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                     }`}
                   >
                     {activeSession.remainingSeconds === 0
-                      ? 'Time Ended · Locked Safe'
+                      ? activeSession.adminRetrievalInProgress
+                        ? 'Admin Retrieval In Progress'
+                        : 'Time Ended · Locked Safe'
                       : activeSession.serviceType === 'storage'
                       ? 'Storage Active'
                       : 'Charging Active'}
@@ -503,7 +542,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                       </span>
                       <span className="text-[11px] text-slate-100/80 font-mono">
                         {activeSession.remainingSeconds === 0
-                          ? `${formatCompartmentLabel(activeSession.slotNumber)} · Ready to Retrieve`
+                          ? activeSession.adminRetrievalInProgress
+                            ? `${formatCompartmentLabel(activeSession.slotNumber)} · Admin Retrieval`
+                            : `${formatCompartmentLabel(activeSession.slotNumber)} · Ready to Retrieve`
                           : `${formatCompartmentLabel(activeSession.slotNumber)} · ${activeSession.pricingTier}`}
                       </span>
                     </div>
@@ -516,7 +557,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                           </span>
                           <span className="text-[11px] text-slate-100/80 font-mono block">
                             {activeSession.remainingSeconds === 0
-                              ? 'Time Ended · Retrieve Anytime'
+                              ? activeSession.adminRetrievalInProgress
+                                ? 'Admin retrieval in progress'
+                                : 'Time ended · Retrieve within 1 hour'
                               : 'Solenoid Locked'}
                           </span>
                         </>
@@ -685,7 +728,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
           </div>
 
           {/* Unlock Confirmation Modal */}
-          {showEndConfirm && activeSession && (
+          {showEndConfirm &&
+            activeSession &&
+            !activeSession.adminRetrievalInProgress && (
             <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-start sm:items-center justify-center p-4 overflow-y-auto">
               <div className="w-full max-w-sm my-auto max-h-[calc(100dvh-2rem)] overflow-y-auto bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 shadow-xl">
                 <h3 className="text-base font-bold text-[#1E293B]">
@@ -1103,6 +1148,16 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
 
           {activeSession ? (
             <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6">
+              {activeSession.remainingSeconds === 0 && (
+                <div className="mb-5 rounded-xl border border-amber-300 bg-amber-50 p-3.5 flex items-start gap-2.5">
+                  <AlertTriangle className="w-4 h-4 text-[#B45309] shrink-0 mt-0.5" />
+                  <p className="text-xs text-[#78350F] leading-relaxed">
+                    {activeSession.adminRetrievalInProgress
+                      ? `An admin is transferring your belongings to the ${UNICHARGE_ADMIN_DESK}. Please wait for the collection notification.`
+                      : `Please retrieve your belongings now. If they remain for one hour after the allotted time, an admin may collect them and hold them at the ${UNICHARGE_ADMIN_DESK}.`}
+                  </p>
+                </div>
+              )}
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-5 border-b border-[#E2E8F0]">
                 <div>
                   <div className="flex items-center gap-2 text-xs font-semibold text-[#1E293B] mb-1">
@@ -1116,7 +1171,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                     <span>Session {activeSession.sessionId}</span>
                     {activeSession.remainingSeconds === 0 && (
                       <span className="px-2 py-0.5 rounded-md bg-amber-50 border border-amber-300 text-[#B45309] text-[10px] font-bold">
-                        Time Ended · Locked Safe
+                        {activeSession.adminRetrievalInProgress
+                          ? 'Admin Retrieval In Progress'
+                          : 'Time Ended · Locked Safe'}
                       </span>
                     )}
                   </div>
@@ -1128,11 +1185,16 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   </p>
                 </div>
                 <button
+                  disabled={activeSession.adminRetrievalInProgress}
                   onClick={() => setShowEndConfirm(true)}
-                  className="px-4 py-2.5 rounded-xl bg-[#DC2626] text-white text-xs font-semibold hover:bg-red-700 flex items-center gap-2 cursor-pointer shrink-0 transition-colors"
+                  className="px-4 py-2.5 rounded-xl bg-[#DC2626] text-white text-xs font-semibold hover:bg-red-700 flex items-center gap-2 cursor-pointer shrink-0 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Unlock className="w-4 h-4" />
-                  <span>End Session &amp; Unlock Locker</span>
+                  <span>
+                    {activeSession.adminRetrievalInProgress
+                      ? 'Admin Retrieval In Progress'
+                      : 'End Session & Unlock Locker'}
+                  </span>
                 </button>
               </div>
 
@@ -1150,7 +1212,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
                   </span>
                   {activeSession.remainingSeconds === 0 && (
                     <span className="text-[11px] text-amber-200 font-mono block mt-0.5">
-                      Locked Safe — Power Cut-Off Active · Retrieve Anytime
+                      {activeSession.adminRetrievalInProgress
+                        ? `Moving to ${UNICHARGE_ADMIN_DESK}`
+                        : 'Locked Safe — Power Cut-Off Active · Retrieve within 1 hour'}
                     </span>
                   )}
                 </div>
@@ -1288,7 +1352,9 @@ export const StudentPortalView: React.FC<StudentPortalViewProps> = ({
           )}
 
           {/* End Session Confirm */}
-          {showEndConfirm && activeSession && (
+          {showEndConfirm &&
+            activeSession &&
+            !activeSession.adminRetrievalInProgress && (
             <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-start sm:items-center justify-center p-4 overflow-y-auto">
               <div className="w-full max-w-sm my-auto max-h-[calc(100dvh-2rem)] overflow-y-auto bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] p-6 shadow-xl">
                 <h3 className="text-base font-bold text-[#1E293B]">

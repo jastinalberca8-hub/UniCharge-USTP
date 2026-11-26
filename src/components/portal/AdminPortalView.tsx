@@ -20,6 +20,8 @@ import {
   Radio,
   Server,
   PhoneCall,
+  Clock,
+  PackageCheck,
 } from 'lucide-react';
 
 export type AdminSection =
@@ -63,6 +65,7 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
     adminRemoteUnlockSlot,
     adminToggleSlotMaintenance,
     adminSimulateSessionFullCharge,
+    adminRetrieveOverdueSession,
     triggerUnexpectedDoorOpen,
     resolveSecurityAlert,
   } = useUniCharge();
@@ -79,6 +82,11 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
     text: string;
   } | null>(null);
   const [isSimulatingCharge, setIsSimulatingCharge] = useState(false);
+  const [collectingSessionId, setCollectingSessionId] = useState<string | null>(null);
+  const [retrievalFeedback, setRetrievalFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
   const station = stations[0];
   const totalSlots = station?.totalSlots || TOTAL_COMPARTMENT_COUNT;
@@ -95,6 +103,9 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
   const selectedSimulationSession =
     activeSimulationSessions.find((session) => session.id === selectedSimulationSessionId) ||
     activeSimulationSessions[0];
+  const expiredSessions = adminStationActivity.activeSessions.filter(
+    (session) => session.kind === 'expired'
+  );
 
   const chargingFree = station
     ? station.slots.filter((s) => s.category === 'charging' && s.status === 'available').length
@@ -228,6 +239,127 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
           </div>
         )}
 
+        {(expiredSessions.length > 0 || retrievalFeedback) && (
+          <div className="bg-[#FFFFFF] rounded-2xl border border-amber-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-amber-100 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-base font-bold text-[#4E6E81] flex items-center gap-2">
+                  <PackageCheck className="w-4 h-4 text-[#B45309]" />
+                  Overdue locker sessions
+                </h2>
+                <p className="text-xs text-[#64748B] mt-1">
+                  Students are asked to retrieve their belongings when time expires. Admin collection becomes available one hour later.
+                </p>
+              </div>
+              <span className="text-xs font-mono text-[#B45309]">
+                {expiredSessions.length} locker{expiredSessions.length === 1 ? '' : 's'} past time
+              </span>
+            </div>
+            <div className="divide-y divide-[#E2E8F0]">
+              {expiredSessions.map((session) => {
+                const retrievalAvailableAtMs = session.retrievalAvailableAtMs ?? Number.POSITIVE_INFINITY;
+                const canCollect = Date.now() >= retrievalAvailableAtMs;
+                const action = session.retrievalInProgress ? 'complete' : 'open';
+                const minutesUntilCollection = Math.max(
+                  1,
+                  Math.ceil((retrievalAvailableAtMs - Date.now()) / 60_000)
+                );
+                return (
+                  <div
+                    key={session.id}
+                    className="px-6 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-semibold text-sm text-[#1E293B]">
+                        {session.userName}
+                      </div>
+                      <div className="text-[11px] text-[#64748B] font-mono mt-0.5">
+                        {session.studentIdNumber} · {formatCompartmentLabel(session.slotNumber)} ·{' '}
+                        {stations.find((item) => item.id === session.stationId)?.name ||
+                          session.stationId}
+                      </div>
+                      <div className="text-[11px] text-[#64748B] mt-1 flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        {session.retrievalInProgress
+                          ? 'Locker open for admin retrieval'
+                          : canCollect
+                          ? 'Eligible for admin collection'
+                          : `Admin collection available in ${minutesUntilCollection} min`}
+                      </div>
+                    </div>
+                    {(canCollect || session.retrievalInProgress) && (
+                      <button
+                        type="button"
+                        disabled={collectingSessionId === session.id}
+                        onClick={() => {
+                          if (
+                            !window.confirm(
+                              action === 'open'
+                                ? `Unlock ${formatCompartmentLabel(
+                                    session.slotNumber
+                                  )} for admin retrieval? The locker will remain unavailable until you confirm the belongings have been moved.`
+                                : `Confirm you have moved ${session.userName}'s belongings from ${formatCompartmentLabel(
+                                    session.slotNumber
+                                  )} to the UniCharge Admin Desk. The student will be notified.`
+                            )
+                          ) {
+                            return;
+                          }
+                          void (async () => {
+                            setRetrievalFeedback(null);
+                            setCollectingSessionId(session.id);
+                            try {
+                              const result = await adminRetrieveOverdueSession(
+                                session.id,
+                                action
+                              );
+                              setRetrievalFeedback({
+                                type: result.success ? 'success' : 'error',
+                                text: result.message,
+                              });
+                            } catch (error) {
+                              setRetrievalFeedback({
+                                type: 'error',
+                                text:
+                                  error instanceof Error
+                                    ? error.message
+                                    : 'Failed to record admin collection.',
+                              });
+                            } finally {
+                              setCollectingSessionId(null);
+                            }
+                          })();
+                        }}
+                        className="px-3.5 py-2 rounded-xl bg-[#4E6E81] text-white text-xs font-semibold hover:bg-[#3D5767] disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
+                      >
+                        {collectingSessionId === session.id
+                          ? action === 'open'
+                            ? 'Unlocking...'
+                            : 'Recording collection...'
+                          : action === 'open'
+                          ? 'Unlock locker'
+                          : 'Confirm moved to Admin Desk'}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {retrievalFeedback && (
+              <p
+                role="status"
+                className={`px-6 py-3 text-xs border-t border-[#E2E8F0] ${
+                  retrievalFeedback.type === 'success'
+                    ? 'text-[#15803D] bg-[#EBF9F3]'
+                    : 'text-[#DC2626] bg-red-50'
+                }`}
+              >
+                {retrievalFeedback.text}
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Live Student Transactions at UniCharge Station */}
         <div className="bg-[#FFFFFF] rounded-2xl border border-[#E2E8F0] overflow-hidden">
           <div className="px-6 py-4 border-b border-[#E2E8F0] flex flex-wrap items-center justify-between gap-2">
@@ -301,7 +433,9 @@ export const AdminPortalView: React.FC<AdminPortalViewProps> = ({
                             : tx.kind === 'active'
                             ? 'Active Session'
                             : tx.kind === 'expired'
-                            ? 'Time Expired · Retrieve'
+                            ? tx.retrievalInProgress
+                              ? 'Admin Retrieval In Progress'
+                              : 'Time Expired · Retrieve'
                             : 'Completed'}
                         </span>
                       </td>

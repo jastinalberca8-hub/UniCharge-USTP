@@ -217,11 +217,17 @@ export function subscribeUserNotifications(
             stationName: String(data.stationName || ''),
             slotNumber: Number(data.slotNumber || 1),
             type:
-              data.type === 'unexpected_door_open'
-                ? ('unexpected_door_open' as const)
+              data.type === 'unexpected_door_open' ||
+              data.type === 'session_expired' ||
+              data.type === 'belongings_collected'
+                ? (data.type as DashboardNotificationType)
                 : ('charge_complete' as const),
             severity:
-              data.severity === 'critical' ? ('critical' as const) : ('info' as const),
+              data.severity === 'critical'
+                ? ('critical' as const)
+                : data.severity === 'warning'
+                ? ('warning' as const)
+                : ('info' as const),
             title: String(data.title || 'UniCharge Alert'),
             message: String(data.message || ''),
             read: Boolean(data.read),

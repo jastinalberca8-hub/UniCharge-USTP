@@ -3,6 +3,7 @@ import type { PricingTier, PricingTierId, ServiceType } from '../types/index.ts'
 export const UNICHARGE_STATION_ID = 'unicharge-station-01';
 export const UNICHARGE_STATION_CODE = 'USTP-UNICHARGE-01';
 export const UNICHARGE_STATION_NAME = 'UniCharge Station';
+export const UNICHARGE_ADMIN_DESK = 'UniCharge Admin Desk';
 
 export const CHARGING_SLOT_COUNT = 15;
 export const STORAGE_SLOT_COUNT = 5;

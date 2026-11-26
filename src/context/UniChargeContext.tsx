@@ -358,8 +358,10 @@ function syncBrowserUrl(route: AppRoute, replace = false): void {
 }
 
 export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [initialAuthToken] = useState(readAppAuthToken);
   const [users, setUsers] = useState<UserAccount[]>(loadUsers);
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => {
+    if (!initialAuthToken && !auth.currentUser) return null;
     const savedId = readStorage<string | null>(STORAGE_KEYS.currentUserId, null);
     if (!savedId || !loadUsers().some((user) => user.id === savedId)) return null;
     const savedUsers = loadUsers();
@@ -424,9 +426,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const databaseNotificationIdsRef = useRef<Set<string>>(new Set());
 
   // App tokens use tab-scoped storage so a page refresh can restore the backend session.
-  const [initialAuthToken] = useState(readAppAuthToken);
   const idTokenRef = useRef<string | null>(initialAuthToken);
   const isBackendSessionRef = useRef<boolean>(false);
+  const [backendSessionReady, setBackendSessionReady] = useState(false);
   const logoutInProgressRef = useRef(false);
   const authGenerationRef = useRef(0);
 
@@ -569,6 +571,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
       idTokenRef.current = token;
       isBackendSessionRef.current = true;
+      setBackendSessionReady(true);
       writeAppAuthToken(token);
       return applyBootstrapPayload(data);
     },
@@ -584,11 +587,12 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     hydrateFromBackend(token, authGeneration).catch((error: unknown) => {
       if (!active || authGeneration !== authGenerationRef.current) return;
       console.error('Failed to restore the saved account session:', error);
-      setAccessDeniedMessage(
-        error instanceof Error
-          ? `Unable to restore your server session: ${error.message}`
-          : 'Unable to restore your server session. Please try again.'
-      );
+      isBackendSessionRef.current = false;
+      setBackendSessionReady(false);
+      setCurrentUser(null);
+      setCurrentRoute('/login');
+      syncBrowserUrl('/login', true);
+      setAccessDeniedMessage('Your saved session could not be restored. Please sign in again.');
     });
 
     return () => {
@@ -617,12 +621,20 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           await hydrateFromBackend(token, authGeneration);
         } catch (err) {
           console.error('Failed to restore authenticated session:', err);
+          if (authGeneration !== authGenerationRef.current) return;
+          isBackendSessionRef.current = false;
+          setBackendSessionReady(false);
+          setCurrentUser(null);
+          setCurrentRoute('/login');
+          syncBrowserUrl('/login', true);
+          setAccessDeniedMessage('Your saved session could not be restored. Please sign in again.');
         }
       } else {
         setFirebaseAuthUser(null);
         if (!idTokenRef.current?.startsWith('uc_')) {
           idTokenRef.current = null;
           isBackendSessionRef.current = false;
+          setBackendSessionReady(false);
         }
       }
     });
@@ -829,7 +841,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }, []);
 
   useEffect(() => {
-    const shouldSyncAuth = isAuthenticated && isBackendSessionRef.current;
+    const shouldSyncAuth = isAuthenticated && backendSessionReady;
     const shouldSyncPublicKiosk = !isAuthenticated && currentRoute === '/kiosk';
     if (!shouldSyncAuth && !shouldSyncPublicKiosk) return;
 
@@ -875,7 +887,13 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       channel?.close();
       syncChannelRef.current = null;
     };
-  }, [currentRoute, isAuthenticated, syncPublicStationState, syncStationState]);
+  }, [
+    backendSessionReady,
+    currentRoute,
+    isAuthenticated,
+    syncPublicStationState,
+    syncStationState,
+  ]);
 
   // Real-time Firestore onSnapshot subscription (only when Firebase Auth is verified & active)
   useEffect(() => {
@@ -1223,6 +1241,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       authGenerationRef.current += 1;
       idTokenRef.current = data.token;
       isBackendSessionRef.current = true;
+      setBackendSessionReady(true);
       writeAppAuthToken(data.token);
       const loadedUser = applyBootstrapPayload(data);
       setAccessDeniedMessage(null);
@@ -1579,6 +1598,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     notifiedChargeSessionsRef.current.clear();
     idTokenRef.current = null;
     isBackendSessionRef.current = false;
+    setBackendSessionReady(false);
     clearAppAuthToken();
     signOut(auth)
       .catch((error: unknown) => {

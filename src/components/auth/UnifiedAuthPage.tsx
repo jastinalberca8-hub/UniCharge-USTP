@@ -35,6 +35,7 @@ export const UnifiedAuthPage: React.FC = () => {
     registerStudentAccount,
     sendPasswordResetCode,
     resetPasswordWithCode,
+    accessDeniedMessage,
     authSuccessMessage,
     clearAuthSuccess,
   } = useUniCharge();
@@ -357,6 +358,16 @@ export const UnifiedAuthPage: React.FC = () => {
                 >
                   <CheckCircle2 className="w-4 h-4 text-[#5BC496] shrink-0" />
                   <span>{authSuccessMessage}</span>
+                </div>
+              )}
+
+              {accessDeniedMessage && (
+                <div
+                  role="alert"
+                  className="mb-5 p-3 rounded-xl bg-red-50 border border-red-200 text-[#DC2626] text-xs font-medium flex items-center gap-2"
+                >
+                  <AlertCircle className="w-4 h-4 text-[#DC2626] shrink-0" />
+                  <span>{accessDeniedMessage}</span>
                 </div>
               )}
 

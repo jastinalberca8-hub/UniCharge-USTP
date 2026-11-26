@@ -397,7 +397,7 @@ export async function ensureCatalogSeeded(): Promise<void> {
           .where(
             and(
               eq(sessions.stationId, UNICHARGE_STATION_ID),
-              eq(sessions.status, 'active')
+              inArray(sessions.status, ['active', 'admin_retrieving'])
             )
           ),
         db
@@ -1305,7 +1305,7 @@ async function releaseExpiredReservationsDb(): Promise<void> {
           and(
             eq(sessions.stationId, tok.stationId),
             eq(sessions.slotNumber, tok.slotNumber),
-            eq(sessions.status, 'active')
+            inArray(sessions.status, ['active', 'admin_retrieving'])
           )
         )
         .limit(1);
@@ -1340,7 +1340,7 @@ async function releaseExpiredReservationsDb(): Promise<void> {
     }
   }
 
-  const [activeSessionRows, activeTokenSlots, slotRows] = await Promise.all([
+  const [occupiedSessionRows, activeTokenSlots, slotRows] = await Promise.all([
     db
       .select({
         id: sessions.id,
@@ -1354,7 +1354,7 @@ async function releaseExpiredReservationsDb(): Promise<void> {
         serviceType: sessions.serviceType,
       })
       .from(sessions)
-      .where(eq(sessions.status, 'active')),
+      .where(inArray(sessions.status, ['active', 'admin_retrieving'])),
     db
       .select({ stationId: lockerUnlockTokens.stationId, slotNumber: lockerUnlockTokens.slotNumber })
       .from(lockerUnlockTokens)
@@ -1367,7 +1367,7 @@ async function releaseExpiredReservationsDb(): Promise<void> {
     db.select().from(lockerSlots),
   ]);
   const nowMs = Date.now();
-  for (const session of activeSessionRows) {
+  for (const session of occupiedSessionRows) {
     if (getRemainingSessionSeconds(session.startTimeMs, session.durationMinutes, nowMs) > 0) {
       continue;
     }
@@ -1385,7 +1385,7 @@ async function releaseExpiredReservationsDb(): Promise<void> {
       .where(eq(sessions.id, session.id));
   }
   const occupiedSlots = new Set(
-    [...activeSessionRows, ...activeTokenSlots].map(
+    [...occupiedSessionRows, ...activeTokenSlots].map(
       (row) => `${row.stationId}:${row.slotNumber}`
     )
   );

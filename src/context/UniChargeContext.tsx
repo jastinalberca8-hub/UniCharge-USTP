@@ -265,7 +265,37 @@ const STORAGE_KEYS = {
   currentUserId: 'unicharge_current_user_id_v4',
   sessions: 'unicharge_sessions_by_user_v3',
   history: 'unicharge_history_by_user_v3',
+  authToken: 'unicharge_auth_token_v1',
 };
+
+function readAppAuthToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const token = window.sessionStorage.getItem(STORAGE_KEYS.authToken);
+    return token?.startsWith('uc_') ? token : null;
+  } catch (error) {
+    console.error('Unable to read the saved account session:', error);
+    return null;
+  }
+}
+
+function writeAppAuthToken(token: string): void {
+  if (typeof window === 'undefined' || !token.startsWith('uc_')) return;
+  try {
+    window.sessionStorage.setItem(STORAGE_KEYS.authToken, token);
+  } catch (error) {
+    console.error('Unable to save the account session for page refresh:', error);
+  }
+}
+
+function clearAppAuthToken(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(STORAGE_KEYS.authToken);
+  } catch (error) {
+    console.error('Unable to clear the saved account session:', error);
+  }
+}
 
 function readStorage<T>(key: string, fallback: T): T {
   if (typeof window === 'undefined') return fallback;
@@ -393,8 +423,9 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const databaseNotificationUserUidRef = useRef<string | null>(null);
   const databaseNotificationIdsRef = useRef<Set<string>>(new Set());
 
-  // Auth token held strictly in memory (never localStorage)
-  const idTokenRef = useRef<string | null>(null);
+  // App tokens use tab-scoped storage so a page refresh can restore the backend session.
+  const [initialAuthToken] = useState(readAppAuthToken);
+  const idTokenRef = useRef<string | null>(initialAuthToken);
   const isBackendSessionRef = useRef<boolean>(false);
   const logoutInProgressRef = useRef(false);
   const authGenerationRef = useRef(0);
@@ -538,10 +569,32 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
       idTokenRef.current = token;
       isBackendSessionRef.current = true;
+      writeAppAuthToken(token);
       return applyBootstrapPayload(data);
     },
     [applyBootstrapPayload]
   );
+
+  useEffect(() => {
+    const token = idTokenRef.current;
+    if (!token?.startsWith('uc_')) return;
+
+    let active = true;
+    const authGeneration = authGenerationRef.current;
+    hydrateFromBackend(token, authGeneration).catch((error: unknown) => {
+      if (!active || authGeneration !== authGenerationRef.current) return;
+      console.error('Failed to restore the saved account session:', error);
+      setAccessDeniedMessage(
+        error instanceof Error
+          ? `Unable to restore your server session: ${error.message}`
+          : 'Unable to restore your server session. Please try again.'
+      );
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [hydrateFromBackend]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
@@ -1170,6 +1223,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       authGenerationRef.current += 1;
       idTokenRef.current = data.token;
       isBackendSessionRef.current = true;
+      writeAppAuthToken(data.token);
       const loadedUser = applyBootstrapPayload(data);
       setAccessDeniedMessage(null);
       setAuthSuccessMessage(null);
@@ -1525,6 +1579,7 @@ export const UniChargeProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     notifiedChargeSessionsRef.current.clear();
     idTokenRef.current = null;
     isBackendSessionRef.current = false;
+    clearAppAuthToken();
     signOut(auth)
       .catch((error: unknown) => {
         console.error('Firebase sign-out failed:', error);
